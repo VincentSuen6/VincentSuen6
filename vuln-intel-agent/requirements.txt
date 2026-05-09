@@ -1,0 +1,8 @@
+anthropic>=0.40.0
+langgraph>=0.2.0
+nvdlib>=0.7.6
+taxii2-client>=2.3.0
+stix2>=3.0.1
+python-dotenv>=1.0.0
+rich>=13.7.0
+requests>=2.31.0
