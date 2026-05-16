@@ -1,0 +1,89 @@
+| Comment =====================================================================
+| Splunk SPL: Threat Intelligence Correlation Dashboard
+| ======================================================
+| Correlates enriched SOAR-Sentinel events (from Splunk HEC) with
+| risk scores, enrichment signals, and MITRE ATT&CK mapping.
+| Designed to surface the highest-fidelity threats for analyst triage.
+|
+| Data source: vuln-intel-agent enrichment_engine → splunk_hec.py
+| Index: security | Recommended: SOC dashboard, 15-min refresh
+| ============================================================================
+
+| Comment --- Top threats by composite risk score ---
+
+index=security sourcetype="wazuh:*" earliest=-24h
+| where isnotnull(risk_score)
+| eval risk_band = case(risk_score >= 80, "CRITICAL",
+                         risk_score >= 60, "HIGH",
+                         risk_score >= 40, "MEDIUM",
+                         true(),           "LOW")
+| stats max(risk_score) AS peak_risk,
+        count AS event_count,
+        values(mitre_technique) AS techniques,
+        values(mitre_tactic) AS tactics,
+        first(description) AS description
+  BY type, agent_name, risk_band
+| sort -peak_risk
+| rename type AS "Alert Type", agent_name AS "Agent", risk_band AS "Risk Band",
+         peak_risk AS "Peak Risk Score", event_count AS "Events",
+         techniques AS "MITRE Techniques", tactics AS "MITRE Tactics"
+
+| Comment --- AbuseIPDB correlation: high-confidence malicious IPs ---
+
+index=security sourcetype="wazuh:*" earliest=-24h
+| where abuse_confidence >= 50
+| stats count AS alerts,
+        max(abuse_confidence) AS max_abuse_score,
+        values(type) AS alert_types,
+        dc(agent_name) AS hosts_hit
+  BY src_ips
+| sort -max_abuse_score
+| eval verdict = case(max_abuse_score >= 90, "CONFIRMED MALICIOUS — Block Immediately",
+                       max_abuse_score >= 70, "HIGH CONFIDENCE — Investigate",
+                       true(),                "SUSPICIOUS — Monitor")
+| rename src_ips AS "Source IP", max_abuse_score AS "Abuse Score (%)",
+         alerts AS "Alert Count", hosts_hit AS "Hosts Targeted", verdict AS "Verdict"
+
+| Comment --- VirusTotal hits: file hashes flagged as malicious ---
+
+index=security sourcetype="wazuh:*" vt_malicious > 0 earliest=-7d
+| stats max(vt_malicious) AS max_vt_detections,
+        count AS appearances,
+        values(path) AS file_paths,
+        values(agent_name) AS agents_affected
+  BY hashes
+| where max_vt_detections >= 3
+| eval threat_level = case(max_vt_detections >= 30, "CRITICAL — Known Malware",
+                             max_vt_detections >= 10, "HIGH — Likely Malware",
+                             true(),                   "MEDIUM — Suspicious File")
+| sort -max_vt_detections
+| rename hashes AS "File Hash", max_vt_detections AS "VT Engine Detections",
+         file_paths AS "File Paths", agents_affected AS "Affected Agents",
+         threat_level AS "Threat Level"
+
+| Comment --- MITRE ATT&CK technique heat map ---
+
+index=security sourcetype="wazuh:*" earliest=-7d
+| mvexpand mitre_technique
+| where mitre_technique != ""
+| stats count AS occurrences, dc(agent_name) AS hosts_affected
+  BY mitre_technique, mitre_tactic
+| sort -occurrences
+| eval coverage_priority = case(occurrences >= 100, "HIGH FREQUENCY — tune detection",
+                                  occurrences >= 20,  "ACTIVE — monitor closely",
+                                  true(),              "OBSERVED — baseline")
+| rename mitre_technique AS "Technique ID", mitre_tactic AS "Tactic",
+         occurrences AS "Occurrences (7d)", hosts_affected AS "Hosts Affected",
+         coverage_priority AS "Priority"
+
+| Comment --- Enrichment source coverage (how many sources fired) ---
+
+index=security sourcetype="wazuh:*" earliest=-24h
+| eval sources_fired = mvcount(split(enrichment.sources_used, ","))
+| stats avg(sources_fired) AS avg_sources,
+        avg(risk_score) AS avg_risk,
+        count AS events
+  BY type
+| sort -avg_risk
+| rename type AS "Alert Type", avg_sources AS "Avg Enrich Sources",
+         avg_risk AS "Avg Risk Score", events AS "Event Count"

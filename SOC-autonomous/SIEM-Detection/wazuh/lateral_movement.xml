@@ -1,0 +1,79 @@
+<!--
+  Wazuh Rule: Lateral Movement Detection
+  ========================================
+  Detects internal SMB/RDP pivoting, pass-the-hash, Mimikatz,
+  and LSASS credential dumping used for lateral movement.
+
+  MITRE ATT&CK : T1021.002 — SMB/Windows Admin Shares
+                 T1550.002 — Pass the Hash
+                 T1003.001 — LSASS Memory Dumping
+                 T1021.001 — Remote Desktop Protocol
+  Severity     : HIGH–CRITICAL (level 12–15)
+
+  Deploy       : /var/ossec/rules/local_rules.xml
+-->
+
+<group name="lateral_movement,credential_dumping,pass_the_hash">
+
+  <!-- Multiple internal SMB connection failures — pivot attempt -->
+  <rule id="100400" level="12" frequency="5" timeframe="60">
+    <if_sid>18152</if_sid>
+    <same_source_ip />
+    <description>Multiple SMB authentication failures from internal host $(srcip) — lateral movement pivot</description>
+    <mitre>
+      <id>T1021.002</id>
+      <id>T1110.001</id>
+    </mitre>
+  </rule>
+
+  <!-- Mimikatz keyword detected in process or file name -->
+  <rule id="100401" level="15">
+    <match>mimikatz|mimilib|sekurlsa|lsadump</match>
+    <description>Mimikatz credential harvesting tool detected — immediate response required</description>
+    <mitre>
+      <id>T1003.001</id>
+    </mitre>
+    <group>critical,credential_dumping</group>
+  </rule>
+
+  <!-- LSASS process access — credential dumping via process injection -->
+  <rule id="100402" level="14">
+    <if_group>windows,sysmon</if_group>
+    <field name="win.eventdata.targetImage">lsass.exe</field>
+    <description>LSASS process accessed by $(win.eventdata.sourceImage) — credential dumping attempt</description>
+    <mitre>
+      <id>T1003.001</id>
+    </mitre>
+  </rule>
+
+  <!-- Unusual RDP connection from non-admin workstation -->
+  <rule id="100403" level="11">
+    <if_sid>18155</if_sid>
+    <description>RDP connection established from $(srcip) to $(dstip) — verify authorization</description>
+    <mitre>
+      <id>T1021.001</id>
+    </mitre>
+  </rule>
+
+  <!-- Pass-the-hash indicator: NTLM auth with no prior password -->
+  <rule id="100404" level="13">
+    <if_group>windows,authentication</if_group>
+    <field name="win.eventdata.logonType">3</field>
+    <field name="win.eventdata.authenticationPackageName">NTLM</field>
+    <description>NTLM network logon from $(srcip) — possible pass-the-hash attack</description>
+    <mitre>
+      <id>T1550.002</id>
+    </mitre>
+  </rule>
+
+  <!-- Admin share access (C$, ADMIN$, IPC$) from workstation -->
+  <rule id="100405" level="11">
+    <if_group>windows,network</if_group>
+    <match>\\ADMIN\$|\\C\$|\\IPC\$</match>
+    <description>Admin share accessed from $(srcip) — possible lateral movement</description>
+    <mitre>
+      <id>T1021.002</id>
+    </mitre>
+  </rule>
+
+</group>

@@ -1,0 +1,57 @@
+| Comment =====================================================================
+| Splunk SPL: SSH Brute Force and Password Spraying Detection
+| ============================================================
+| Identifies credential attacks: brute force (same user, many IPs),
+| password spray (many users, same IP), and success-after-failure.
+| MITRE: T1110.001 (Password Guessing), T1110.003 (Password Spraying)
+| Index: wazuh-alerts | Recommended schedule: every 5 minutes, 30m window
+| ============================================================================
+
+| Comment --- Query 1: Brute Force — same IP, same user, many failures ---
+
+index=wazuh sourcetype="wazuh:json"
+    (rule.id=5760 OR rule.groups="authentication_failed")
+    earliest=-30m
+| stats count AS failed_attempts,
+        dc(agent.name) AS hosts_targeted,
+        first(_time) AS first_seen,
+        last(_time) AS last_seen
+  BY data.srcip, data.dstuser
+| where failed_attempts >= 8
+| eval duration_secs = last_seen - first_seen
+| eval attack_rate = round(failed_attempts / max(duration_secs, 1) * 60, 1) . " attempts/min"
+| eval threat = if(failed_attempts >= 20, "CRITICAL — Active Brute Force", "HIGH — Brute Force Detected")
+| sort -failed_attempts
+| rename data.srcip AS "Source IP", data.dstuser AS "Target User",
+         failed_attempts AS "Failed Attempts", hosts_targeted AS "Hosts Targeted",
+         attack_rate AS "Attack Rate", threat AS "Threat Level"
+
+| Comment --- Query 2: Password Spray — same IP, multiple users ---
+
+index=wazuh sourcetype="wazuh:json"
+    (rule.id=5760 OR rule.groups="authentication_failed")
+    earliest=-30m
+| stats count AS failed_attempts,
+        dc(data.dstuser) AS unique_users_targeted,
+        values(data.dstuser) AS targeted_users
+  BY data.srcip
+| where unique_users_targeted >= 5
+| eval spray_type = if(unique_users_targeted >= 20, "CRITICAL — Large-Scale Spray", "HIGH — Password Spray")
+| sort -unique_users_targeted
+| rename data.srcip AS "Source IP", unique_users_targeted AS "Users Targeted",
+         targeted_users AS "User List", spray_type AS "Spray Classification"
+
+| Comment --- Query 3: Success After Failure — credential found ---
+
+index=wazuh sourcetype="wazuh:json" earliest=-1h
+| eval event_type = case(
+    rule.id="5760" OR rule.groups="authentication_failed", "FAILURE",
+    rule.id="5715" OR rule.groups="authentication_success", "SUCCESS",
+    true(), null()
+  )
+| where isnotnull(event_type)
+| stats values(event_type) AS events, count BY data.srcip, data.dstuser
+| where mvfind(events, "FAILURE") >= 0 AND mvfind(events, "SUCCESS") >= 0
+| eval ALERT = "SUCCESS AFTER FAILURE — Credentials Likely Compromised"
+| table data.srcip, data.dstuser, events, ALERT
+| rename data.srcip AS "Source IP", data.dstuser AS "User Account"

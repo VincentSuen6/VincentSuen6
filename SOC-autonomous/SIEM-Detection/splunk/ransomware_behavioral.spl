@@ -1,0 +1,50 @@
+| Comment =====================================================================
+| Splunk SPL: Ransomware Behavioral Detection
+| =============================================
+| Multi-signal detection combining file extension changes, shadow copy deletion,
+| backup service stops, and process kill sweeps.
+| MITRE: T1486 (Data Encrypted for Impact), T1490 (Inhibit System Recovery)
+| Index: wazuh-alerts, winlogbeat | Recommended schedule: real-time
+| ============================================================================
+
+| Comment --- Signal 1: Mass file extension changes (encryption sweep) ---
+
+index=wazuh sourcetype="wazuh:json" rule.groups="syscheck" earliest=-5m
+| where match(syscheck.path, "\.locked$|\.encrypted$|\.enc$|\.ryuk$|\.conti$|\.lockbit$|\.blackcat$|\.wncry$|\.ransom$")
+| stats count AS encrypted_files,
+        dc(syscheck.path) AS unique_paths,
+        values(agent.name) AS affected_agents
+  BY _time span=1m
+| where encrypted_files >= 20
+| eval severity = case(encrypted_files >= 100, "CRITICAL — ACTIVE RANSOMWARE ENCRYPTION",
+                        encrypted_files >= 50,  "CRITICAL — Rapid File Encryption",
+                        true(),                  "HIGH — Possible Ransomware")
+| sort -_time
+| rename encrypted_files AS "Encrypted Files/min", unique_paths AS "Unique Paths", severity AS "Verdict"
+
+| Comment --- Signal 2: Shadow copy deletion commands ---
+
+index=wazuh OR index=winlogbeat earliest=-1h
+| where match(_raw, "vssadmin delete|wmic shadowcopy delete|bcdedit.*recoveryenabled.*no|wbadmin delete catalog")
+| stats count AS deletion_commands, values(_raw) AS commands, dc(host) AS hosts_affected
+  BY src_user, host
+| eval ALERT = "CRITICAL — Shadow Copy Deletion Detected — Recovery Inhibition (T1490)"
+| table _time, host, src_user, deletion_commands, commands, ALERT
+
+| Comment --- Signal 3: Ransomware pre-cursor process kills ---
+
+index=winlogbeat sourcetype="WinEventLog:Security"
+    (EventCode=4689 OR EventCode=4688) earliest=-30m
+| where match(Process_Command_Line, "taskkill.*/f.*/im|Stop-Process.*-Force")
+| stats count AS kill_commands, values(Process_Command_Line) AS cmds
+  BY Computer, Account_Name
+| where kill_commands >= 5
+| eval ALERT = "HIGH — Mass Process Termination — Possible AV Kill Before Encryption"
+
+| Comment --- Signal 4: Ransom note creation ---
+
+index=wazuh sourcetype="wazuh:json" rule.groups="syscheck" syscheck.event=added
+| where match(syscheck.path, "(?i)readme.*\.txt$|HOW_TO_DECRYPT|RECOVER_FILES|RANSOM_NOTE|!!!.*!!!|YOUR_FILES")
+| eval ALERT = "CRITICAL — Ransom Note Created — Encryption Complete: " . syscheck.path
+| table _time, agent.name, syscheck.path, ALERT
+| sort -_time

@@ -1,0 +1,82 @@
+<!--
+  Wazuh Rule: SSH Brute Force and Authentication Attacks
+  =======================================================
+  Detects credential stuffing, brute force, and password spraying
+  against SSH and other authentication services.
+
+  MITRE ATT&CK : T1110.001 — Password Guessing
+                 T1110.003 — Password Spraying
+                 T1078     — Valid Accounts (post-success)
+  Severity     : HIGH (level 12–14)
+
+  Deploy       : /var/ossec/rules/local_rules.xml
+-->
+
+<group name="authentication,brute_force,credential_access">
+
+  <!-- SSH brute force — 8+ failures in 60 seconds from same source -->
+  <rule id="100200" level="12" frequency="8" timeframe="60">
+    <if_matched_sid>5760</if_matched_sid>
+    <same_source_ip />
+    <description>SSH brute force: 8+ failed attempts from $(srcip) in 60 seconds</description>
+    <mitre>
+      <id>T1110.001</id>
+    </mitre>
+    <group>brute_force,pci_dss_11.4,gdpr_IV_35.7.d</group>
+  </rule>
+
+  <!-- SSH brute force — escalated: 20+ failures (active attack) -->
+  <rule id="100201" level="14" frequency="20" timeframe="60">
+    <if_matched_sid>5760</if_matched_sid>
+    <same_source_ip />
+    <description>SSH brute force ESCALATED: 20+ failed attempts from $(srcip) — active attack</description>
+    <mitre>
+      <id>T1110.001</id>
+    </mitre>
+  </rule>
+
+  <!-- Password spraying — failures across MULTIPLE users from same IP -->
+  <rule id="100202" level="13" frequency="5" timeframe="120">
+    <if_matched_sid>5760</if_matched_sid>
+    <same_source_ip />
+    <different_dstuser />
+    <description>Password spray detected from $(srcip) — multiple usernames targeted</description>
+    <mitre>
+      <id>T1110.003</id>
+    </mitre>
+  </rule>
+
+  <!-- SSH success after repeated failures — credential found -->
+  <rule id="100203" level="14">
+    <if_matched_sid>100200</if_matched_sid>
+    <if_sid>5715</if_sid>
+    <same_source_ip />
+    <description>SSH brute force SUCCESS — login after repeated failures from $(srcip) as $(dstuser)</description>
+    <mitre>
+      <id>T1110.001</id>
+      <id>T1078</id>
+    </mitre>
+    <group>authentication_success_after_failure</group>
+  </rule>
+
+  <!-- Root login via SSH — direct root auth (should be disabled) -->
+  <rule id="100204" level="12">
+    <if_sid>5715</if_sid>
+    <match>root</match>
+    <description>Root user logged in via SSH from $(srcip) — verify this is authorized</description>
+    <mitre>
+      <id>T1078.003</id>
+    </mitre>
+  </rule>
+
+  <!-- Login from unexpected geography (new source IP range) -->
+  <rule id="100205" level="10">
+    <if_sid>5715</if_sid>
+    <description>Successful SSH login from new source IP $(srcip) as $(dstuser)</description>
+    <mitre>
+      <id>T1078</id>
+    </mitre>
+    <group>authentication_success,geographic_anomaly</group>
+  </rule>
+
+</group>

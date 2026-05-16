@@ -1,0 +1,80 @@
+<!--
+  Wazuh Rule: Ransomware Behavioral Detection
+  ============================================
+  Detects ransomware indicators: mass file encryption (extension changes),
+  shadow copy deletion, backup destruction, and ransom note creation.
+
+  Covers: LockBit, BlackCat, Conti, REvil, Ryuk behavioral patterns.
+
+  MITRE ATT&CK : T1486  — Data Encrypted for Impact
+                 T1490  — Inhibit System Recovery
+                 T1489  — Service Stop (backup services)
+                 T1070.004 — File Deletion (cleanup)
+  Severity     : CRITICAL (level 14–15)
+
+  Deploy       : /var/ossec/rules/local_rules.xml
+-->
+
+<group name="ransomware,impact,data_encrypted">
+
+  <!-- Mass file extension changes — encryption sweep in progress -->
+  <rule id="100500" level="15" frequency="50" timeframe="30">
+    <if_group>syscheck</if_group>
+    <field name="syscheck.path">\.locked$|\.encrypted$|\.enc$|\.ryuk$|\.conti$|\.lockbit$|\.blackcat$|\.wncry$</field>
+    <description>Mass file encryption detected — ransomware in progress (50+ files in 30s)</description>
+    <mitre>
+      <id>T1486</id>
+    </mitre>
+    <group>critical,ransomware,pci_dss_6.5.8</group>
+  </rule>
+
+  <!-- Shadow copy deletion — recovery inhibition -->
+  <rule id="100501" level="15">
+    <match>vssadmin delete shadows|wmic shadowcopy delete|bcdedit /set recoveryenabled no|wbadmin delete</match>
+    <description>Shadow copy / backup deletion detected — ransomware recovery inhibition</description>
+    <mitre>
+      <id>T1490</id>
+    </mitre>
+    <group>critical,ransomware</group>
+  </rule>
+
+  <!-- Backup service stopped — Ryuk/Conti pattern -->
+  <rule id="100502" level="13">
+    <match>net stop "Windows Backup"|net stop vss|net stop "SQL Server"|net stop "Backup Exec"</match>
+    <description>Backup or database service stopped — ransomware pre-encryption phase</description>
+    <mitre>
+      <id>T1489</id>
+    </mitre>
+  </rule>
+
+  <!-- Ransom note file created -->
+  <rule id="100503" level="15">
+    <if_group>syscheck</if_group>
+    <field name="syscheck.path">README.*\.txt$|HOW_TO_DECRYPT|RECOVER_FILES|!!! IMPORTANT !!!|RANSOM_NOTE</field>
+    <description>Ransom note file created — encryption complete, data at risk</description>
+    <mitre>
+      <id>T1486</id>
+    </mitre>
+    <group>critical,ransomware</group>
+  </rule>
+
+  <!-- Suspicious PowerShell downloading payload (ransomware dropper) -->
+  <rule id="100504" level="13">
+    <match>powershell.*IEX|powershell.*DownloadString|powershell.*EncodedCommand|powershell.*bypass.*hidden</match>
+    <description>Suspicious PowerShell execution — possible ransomware dropper</description>
+    <mitre>
+      <id>T1059.001</id>
+      <id>T1027</id>
+    </mitre>
+  </rule>
+
+  <!-- Process kill sweep (killing AV/EDR before encryption) -->
+  <rule id="100505" level="12" frequency="10" timeframe="30">
+    <match>taskkill /f /im|Stop-Process -Force</match>
+    <description>Mass process termination detected — possible AV/EDR kill before ransomware deployment</description>
+    <mitre>
+      <id>T1562.001</id>
+    </mitre>
+  </rule>
+
+</group>

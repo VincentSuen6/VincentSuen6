@@ -1,0 +1,81 @@
+<!--
+  Wazuh Rule: Privilege Escalation Detection
+  ===========================================
+  Detects SUID abuse, sudo escalation, kernel exploits,
+  and capability misuse used to gain elevated privileges.
+
+  MITRE ATT&CK : T1548.001 — Setuid and Setgid
+                 T1548.003 — Sudo and Sudo Caching Abuse
+                 T1068     — Exploitation for Privilege Escalation
+                 T1055     — Process Injection
+  Severity     : HIGH–CRITICAL (level 12–15)
+
+  Deploy       : /var/ossec/rules/local_rules.xml
+-->
+
+<group name="privilege_escalation,suid,sudo_abuse">
+
+  <!-- SUID binary execution by non-root user -->
+  <rule id="100300" level="12">
+    <if_group>syscheck</if_group>
+    <field name="syscheck.path">/usr/bin/|/usr/sbin/|/bin/|/sbin/</field>
+    <field name="syscheck.changed_attributes">perm</field>
+    <description>SUID/SGID bit set on system binary — potential privilege escalation: $(syscheck.path)</description>
+    <mitre>
+      <id>T1548.001</id>
+    </mitre>
+  </rule>
+
+  <!-- Sudo privilege escalation — user running sudo for root shell -->
+  <rule id="100301" level="13">
+    <if_sid>5402</if_sid>
+    <match>COMMAND=/bin/bash|COMMAND=/bin/sh|COMMAND=/usr/bin/python|COMMAND=!/</match>
+    <description>Sudo shell escape attempted by $(dstuser) — possible privilege escalation</description>
+    <mitre>
+      <id>T1548.003</id>
+    </mitre>
+  </rule>
+
+  <!-- New user added to sudo/wheel group -->
+  <rule id="100302" level="13">
+    <if_group>account_changed</if_group>
+    <match>sudo|wheel|admin</match>
+    <description>User added to privileged group (sudo/wheel) — verify authorization: $(dstuser)</description>
+    <mitre>
+      <id>T1098</id>
+    </mitre>
+  </rule>
+
+  <!-- Process running as root spawned by non-root parent -->
+  <rule id="100303" level="12">
+    <if_group>ossec,process_monitor</if_group>
+    <match>setuid|setgid</match>
+    <description>Suspicious setuid/setgid system call detected — process injection possible</description>
+    <mitre>
+      <id>T1055</id>
+      <id>T1548.001</id>
+    </mitre>
+  </rule>
+
+  <!-- /etc/passwd or /etc/shadow modification -->
+  <rule id="100304" level="14">
+    <if_group>syscheck</if_group>
+    <field name="syscheck.path">/etc/passwd$|/etc/shadow$|/etc/group$</field>
+    <description>Critical auth file modified — account manipulation: $(syscheck.path)</description>
+    <mitre>
+      <id>T1136.001</id>
+      <id>T1531</id>
+    </mitre>
+  </rule>
+
+  <!-- Kernel module loaded (rootkit indicator) -->
+  <rule id="100305" level="15">
+    <match>insmod|modprobe|rmmod</match>
+    <description>Kernel module operation detected — possible rootkit loading</description>
+    <mitre>
+      <id>T1547.006</id>
+    </mitre>
+    <group>rootkit,critical</group>
+  </rule>
+
+</group>

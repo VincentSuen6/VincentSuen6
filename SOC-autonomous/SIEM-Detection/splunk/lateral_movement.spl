@@ -1,0 +1,62 @@
+| Comment =====================================================================
+| Splunk SPL: Lateral Movement Detection
+| ========================================
+| Detects internal pivoting via SMB, RDP, pass-the-hash (NTLM network logons),
+| and suspicious process-to-process connections between internal hosts.
+| MITRE: T1021.002 (SMB), T1021.001 (RDP), T1550.002 (Pass-the-Hash)
+| Index: wazuh-alerts, winlogbeat | Recommended schedule: every 5 minutes
+| ============================================================================
+
+| Comment --- SMB Lateral Movement: internal-to-internal auth failures ---
+
+index=wazuh OR index=winlogbeat earliest=-30m
+    (sourcetype="wazuh:json" rule.id IN (18152, 18153))
+    OR (sourcetype="WinEventLog:Security" EventCode=4625 LogonType=3)
+| where NOT match(src_ip, "^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)") OR
+        match(src_ip, "^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)")
+| eval is_internal_src = if(match(src_ip, "^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)"), "YES", "NO")
+| where is_internal_src = "YES"
+| stats count AS smb_failures,
+        dc(dest) AS hosts_targeted,
+        values(dest) AS target_hosts
+  BY src_ip, user
+| where smb_failures >= 3
+| eval risk = case(smb_failures >= 10, "CRITICAL — Mass SMB Pivot",
+                   smb_failures >= 5,  "HIGH — SMB Lateral Movement",
+                   true(),             "MEDIUM — SMB Anomaly")
+| sort -smb_failures
+| rename src_ip AS "Source Host", user AS "Account", smb_failures AS "SMB Failures",
+         hosts_targeted AS "Hosts Targeted", risk AS "Risk Level"
+
+| Comment --- NTLM Network Logon: Pass-the-Hash indicator ---
+
+index=winlogbeat sourcetype="WinEventLog:Security"
+    EventCode=4624 LogonType=3 AuthenticationPackageName=NTLM
+    earliest=-1h
+| where src_ip != dest_ip
+| eval is_internal = if(match(src_ip, "^(10\.|172\.|192\.168\.)"), "internal", "external")
+| stats count AS ntlm_logons,
+        dc(dest) AS unique_destinations,
+        values(dest) AS destinations
+  BY src_ip, user, is_internal
+| where ntlm_logons >= 3 OR unique_destinations >= 3
+| eval pth_likelihood = case(
+    unique_destinations >= 5, "HIGH — likely Pass-the-Hash sweep",
+    ntlm_logons >= 10, "MEDIUM — unusual NTLM volume",
+    true(), "LOW — monitor"
+  )
+| sort -ntlm_logons
+| rename src_ip AS "Source IP", user AS "Account",
+         ntlm_logons AS "NTLM Logons", unique_destinations AS "Unique Destinations",
+         pth_likelihood AS "PtH Likelihood"
+
+| Comment --- RDP Lateral Movement: unusual destination spread ---
+
+index=winlogbeat sourcetype="WinEventLog:Security"
+    EventCode=4624 LogonType=10
+    earliest=-1h
+| stats dc(dest) AS rdp_destinations, values(dest) AS dest_list, count AS logon_count
+  BY src_ip, user
+| where rdp_destinations >= 3
+| eval alert = "Unusual RDP spread — " . rdp_destinations . " destinations in 1h"
+| sort -rdp_destinations
