@@ -60,6 +60,8 @@ DOCKER_POLL       = int(os.getenv("DOCKER_POLL_INTERVAL", "30"))
 ENRICH_ENABLED    = os.getenv("ENRICH_ENABLED", "true").lower() == "true"
 SPLUNK_ENABLED    = os.getenv("SPLUNK_ENABLED", "true").lower() == "true"
 CVE_TRIGGER       = os.getenv("CVE_AUTO_TRIGGER", "true").lower() == "true"
+SOAR_ENABLED      = os.getenv("SOAR_GRAPH_ENABLED", "true").lower() == "true"
+CSPM_ENABLED      = os.getenv("CSPM_ENABLED", "true").lower() == "true"
 
 GITHUB_HEADERS    = {
     "Authorization": f"Bearer {GITHUB_TOKEN}",
@@ -324,14 +326,16 @@ def docker_source():
 
 def process_events():
     """
-    Reads from the shared queue, runs enrichment, sends to Splunk,
-    pushes to GitHub, and optionally triggers the Claude CVE pipeline.
+    Reads from the shared queue (Wazuh + Elastic + Docker + CSPM),
+    runs enrichment, sends to Splunk HEC, pushes to GitHub audit ledger,
+    routes through the LangGraph SOAR state machine, and optionally
+    triggers the Claude CVE intelligence pipeline.
     """
-    # Import here to avoid circular deps
     sys.path.insert(0, str(Path(__file__).parent.parent))
     from intelligence.enrichment_engine import enrich_threat
     from intelligence.splunk_hec import send_to_splunk
     from detection.pipeline_bridge import push_to_github
+    from response.soar_graph import run_soar_graph
 
     print("[Orchestrator] Event processor started")
 
@@ -339,21 +343,35 @@ def process_events():
         try:
             threat = event_queue.get(timeout=5)
 
-            print(f"\n[Orchestrator] Processing: {threat['type']} from {threat['source']}")
+            source = threat.get("source", "unknown")
+            ttype  = threat.get("type", "UNKNOWN")
+            level  = threat.get("rule_level", 0)
+            print(f"\n[Orchestrator] ── {source.upper()} event ── {ttype} (level {level})")
 
-            # Step 1 — Enrich
+            # Step 1 — Data Enrichment Engine (6 intel sources)
             if ENRICH_ENABLED:
                 threat = enrich_threat(threat)
+                print(f"[Orchestrator] Risk score: {threat.get('risk_score', 0)}/100")
 
-            # Step 2 — Send to Splunk SIEM
+            # Step 2 — Splunk SIEM HEC (Forensics & Dashboards)
             if SPLUNK_ENABLED:
                 send_to_splunk(threat)
 
-            # Step 3 — Push to GitHub (audit ledger + triggers response agent)
+            # Step 3 — GitHub Audit Ledger (triggers active_response_agent.py watcher)
             if GITHUB_TOKEN and GITHUB_REPO:
                 push_to_github(threat)
 
-            # Step 4 — Auto-trigger CVE pipeline if alert references a CVE
+            # Step 4 — LangGraph SOAR State Machine (triage → intel → remediation)
+            #          Only run for alerts at or above HIGH priority
+            if SOAR_ENABLED and level >= 9:
+                threading.Thread(
+                    target=run_soar_graph,
+                    args=(threat,),
+                    daemon=True,
+                    name=f"soar-{ttype}",
+                ).start()
+
+            # Step 5 — Auto-trigger CVE intelligence pipeline if alert names a CVE
             if CVE_TRIGGER and threat.get("cve_id"):
                 cve_id = threat["cve_id"]
                 print(f"[Orchestrator] CVE detected: {cve_id} — triggering Claude analyst...")
@@ -386,16 +404,27 @@ def run():
     print("=" * 60)
     print("  Python Log Orchestrator — Security Telemetry Hub")
     print("=" * 60)
-    print(f"  Sources  : Wazuh EDR | Elastic SIEM | Docker Containers")
-    print(f"  Sinks    : Splunk HEC | GitHub Audit Ledger | Claude AI")
+    print(f"  Sources  : Wazuh EDR | Elastic SIEM | Docker | CSPM")
+    print(f"  Sinks    : Splunk HEC | GitHub Audit Ledger | SOAR Graph")
     print(f"  Enrich   : {'ON' if ENRICH_ENABLED else 'OFF'}")
     print(f"  Splunk   : {'ON' if SPLUNK_ENABLED else 'OFF'}")
+    print(f"  SOAR     : {'ON' if SOAR_ENABLED else 'OFF'}")
+    print(f"  CSPM     : {'ON' if CSPM_ENABLED else 'OFF'}")
     print("=" * 60 + "\n")
+
+    # CSPM source thread (cloud posture monitoring)
+    def _cspm_thread():
+        if not CSPM_ENABLED:
+            print("[CSPM] Disabled — set CSPM_ENABLED=true to enable")
+            return
+        from detection.cspm_auditor import run as cspm_run
+        cspm_run(event_queue)
 
     threads = [
         threading.Thread(target=wazuh_source,  daemon=True, name="wazuh"),
         threading.Thread(target=elastic_source, daemon=True, name="elastic"),
         threading.Thread(target=docker_source,  daemon=True, name="docker"),
+        threading.Thread(target=_cspm_thread,   daemon=True, name="cspm"),
         threading.Thread(target=process_events, daemon=True, name="processor"),
     ]
 
