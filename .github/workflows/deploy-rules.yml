@@ -1,0 +1,37 @@
+name: Deploy Detection Rules
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'agentic-SOC-operator/SIEM-Detection/**'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests urllib3
+
+      - name: Deploy rules to Wazuh / Splunk / Elastic
+        env:
+          # Wazuh REST API (port 55000)
+          WAZUH_IP:        ${{ secrets.WAZUH_IP }}
+          WAZUH_API_USER:  ${{ secrets.WAZUH_API_USER }}
+          WAZUH_API_PASS:  ${{ secrets.WAZUH_API_PASS }}
+          # Elastic/Kibana (9201 / 5602)
+          ELASTIC_IP:      ${{ secrets.ELASTIC_IP }}
+          ELASTIC_USER:    ${{ secrets.ELASTIC_USER }}
+          ELASTIC_PASS:    ${{ secrets.ELASTIC_PASS }}
+          KIBANA_IP:       ${{ secrets.KIBANA_IP }}
+          # Splunk REST API (port 8089)
+          SPLUNK_IP:       ${{ secrets.SPLUNK_IP }}
+          SPLUNK_REST_USER: ${{ secrets.SPLUNK_REST_USER }}
+          SPLUNK_REST_PASS: ${{ secrets.SPLUNK_REST_PASS }}
+        run: python .github/scripts/deploy_rules.py

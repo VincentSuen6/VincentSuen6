@@ -1,0 +1,252 @@
+[
+  {
+    "name": "Lateral Movement: Mimikatz Credential Harvesting Tool Detected",
+    "description": "Detects Mimikatz and its modules (sekurlsa, lsadump, mimilib) by name in process or file events. Mimikatz is the primary post-exploitation credential dumping tool. Immediate response required. MITRE T1003.001 - LSASS Memory.",
+    "rule_id": "soc-lm-001",
+    "enabled": true,
+    "risk_score": 99,
+    "severity": "critical",
+    "type": "eql",
+    "language": "eql",
+    "query": "any where\n  process.name like~ \"*mimikatz*\" or\n  process.pe.original_file_name like~ \"*mimikatz*\" or\n  file.name like~ \"*mimikatz*\" or\n  process.command_line like~ (\"*sekurlsa*\", \"*lsadump*\", \"*mimilib*\", \"*kerberos::ptt*\", \"*privilege::debug*\")",
+    "index": ["winlogbeat-*", "logs-endpoint.events.*", "logs-*"],
+    "interval": "5m",
+    "from": "now-6m",
+    "max_signals": 100,
+    "tags": ["SOC", "Credential Access", "Lateral Movement", "Mimikatz", "T1003.001", "Critical"],
+    "threat": [
+      {
+        "framework": "MITRE ATT&CK",
+        "tactic": {
+          "id": "TA0006",
+          "name": "Credential Access",
+          "reference": "https://attack.mitre.org/tactics/TA0006/"
+        },
+        "technique": [
+          {
+            "id": "T1003",
+            "name": "OS Credential Dumping",
+            "reference": "https://attack.mitre.org/techniques/T1003/",
+            "subtechnique": [
+              {
+                "id": "T1003.001",
+                "name": "LSASS Memory",
+                "reference": "https://attack.mitre.org/techniques/T1003/001/"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "actions": []
+  },
+  {
+    "name": "Lateral Movement: LSASS Process Access by Unusual Process",
+    "description": "EQL sequence detects a non-system process opening a handle to lsass.exe — the primary technique for in-memory credential dumping without writing Mimikatz to disk. MITRE T1003.001.",
+    "rule_id": "soc-lm-002",
+    "enabled": true,
+    "risk_score": 91,
+    "severity": "critical",
+    "type": "eql",
+    "language": "eql",
+    "query": "process where event.type == \"start\" and\n  process.name == \"lsass.exe\" and\n  not process.parent.name in (\"wininit.exe\", \"services.exe\")",
+    "index": ["winlogbeat-*", "logs-endpoint.events.process-*", "logs-*"],
+    "interval": "5m",
+    "from": "now-6m",
+    "max_signals": 100,
+    "tags": ["SOC", "Credential Access", "LSASS", "T1003.001", "Critical"],
+    "threat": [
+      {
+        "framework": "MITRE ATT&CK",
+        "tactic": {
+          "id": "TA0006",
+          "name": "Credential Access",
+          "reference": "https://attack.mitre.org/tactics/TA0006/"
+        },
+        "technique": [
+          {
+            "id": "T1003",
+            "name": "OS Credential Dumping",
+            "reference": "https://attack.mitre.org/techniques/T1003/",
+            "subtechnique": [
+              {
+                "id": "T1003.001",
+                "name": "LSASS Memory",
+                "reference": "https://attack.mitre.org/techniques/T1003/001/"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "actions": []
+  },
+  {
+    "name": "Lateral Movement: Pass-the-Hash — NTLM Network Logon",
+    "description": "Detects Windows Event 4624 (LogonType=3, NTLM) with no prior Kerberos negotiation — the hallmark of pass-the-hash lateral movement using harvested NTLM hashes. MITRE T1550.002.",
+    "rule_id": "soc-lm-003",
+    "enabled": true,
+    "risk_score": 73,
+    "severity": "high",
+    "type": "query",
+    "language": "kuery",
+    "query": "event.code:\"4624\" and winlog.event_data.LogonType:\"3\" and winlog.event_data.AuthenticationPackageName:\"NTLM\" and not source.ip:(\"127.0.0.1\" or \"::1\" or \"0.0.0.0\")",
+    "index": ["winlogbeat-*", "logs-*"],
+    "interval": "5m",
+    "from": "now-6m",
+    "max_signals": 200,
+    "tags": ["SOC", "Lateral Movement", "Pass the Hash", "T1550.002"],
+    "threat": [
+      {
+        "framework": "MITRE ATT&CK",
+        "tactic": {
+          "id": "TA0008",
+          "name": "Lateral Movement",
+          "reference": "https://attack.mitre.org/tactics/TA0008/"
+        },
+        "technique": [
+          {
+            "id": "T1550",
+            "name": "Use Alternate Authentication Material",
+            "reference": "https://attack.mitre.org/techniques/T1550/",
+            "subtechnique": [
+              {
+                "id": "T1550.002",
+                "name": "Pass the Hash",
+                "reference": "https://attack.mitre.org/techniques/T1550/002/"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "actions": []
+  },
+  {
+    "name": "Lateral Movement: SMB Internal Pivot — Multiple Auth Failures",
+    "description": "Detects repeated SMB authentication failures from an internal host to multiple targets — a classic lateral movement pivot pattern using harvested credentials against the internal network. MITRE T1021.002.",
+    "rule_id": "soc-lm-004",
+    "enabled": true,
+    "risk_score": 73,
+    "severity": "high",
+    "type": "threshold",
+    "language": "kuery",
+    "query": "event.code:(\"4625\" or \"675\") and winlog.event_data.LogonType:(\"3\") and destination.port:445",
+    "index": ["winlogbeat-*", "filebeat-*", "logs-*"],
+    "threshold": {
+      "field": ["source.ip"],
+      "value": 5
+    },
+    "interval": "5m",
+    "from": "now-6m",
+    "max_signals": 100,
+    "tags": ["SOC", "Lateral Movement", "SMB", "T1021.002"],
+    "threat": [
+      {
+        "framework": "MITRE ATT&CK",
+        "tactic": {
+          "id": "TA0008",
+          "name": "Lateral Movement",
+          "reference": "https://attack.mitre.org/tactics/TA0008/"
+        },
+        "technique": [
+          {
+            "id": "T1021",
+            "name": "Remote Services",
+            "reference": "https://attack.mitre.org/techniques/T1021/",
+            "subtechnique": [
+              {
+                "id": "T1021.002",
+                "name": "SMB/Windows Admin Shares",
+                "reference": "https://attack.mitre.org/techniques/T1021/002/"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "actions": []
+  },
+  {
+    "name": "Lateral Movement: Windows Admin Share Access (C$, ADMIN$, IPC$)",
+    "description": "Detects network access to Windows admin shares (C$, ADMIN$, IPC$) from a workstation IP — a strong lateral movement indicator when originating from non-admin systems. MITRE T1021.002.",
+    "rule_id": "soc-lm-005",
+    "enabled": true,
+    "risk_score": 47,
+    "severity": "medium",
+    "type": "query",
+    "language": "kuery",
+    "query": "event.code:\"5140\" and (winlog.event_data.ShareName:(\"\\\\\\\\*\\\\C$\" or \"\\\\\\\\*\\\\ADMIN$\" or \"\\\\\\\\*\\\\IPC$\") or winlog.event_data.ObjectName:(\"\\\\C$\" or \"\\\\ADMIN$\" or \"\\\\IPC$\"))",
+    "index": ["winlogbeat-*", "logs-*"],
+    "interval": "5m",
+    "from": "now-6m",
+    "max_signals": 100,
+    "tags": ["SOC", "Lateral Movement", "Admin Shares", "T1021.002"],
+    "threat": [
+      {
+        "framework": "MITRE ATT&CK",
+        "tactic": {
+          "id": "TA0008",
+          "name": "Lateral Movement",
+          "reference": "https://attack.mitre.org/tactics/TA0008/"
+        },
+        "technique": [
+          {
+            "id": "T1021",
+            "name": "Remote Services",
+            "reference": "https://attack.mitre.org/techniques/T1021/",
+            "subtechnique": [
+              {
+                "id": "T1021.002",
+                "name": "SMB/Windows Admin Shares",
+                "reference": "https://attack.mitre.org/techniques/T1021/002/"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "actions": []
+  },
+  {
+    "name": "Lateral Movement: Unusual RDP Connection Established",
+    "description": "Detects Windows RDP connections (Event 4624 LogonType=10) from source IPs that are not typical management hosts. RDP is frequently used for lateral movement after initial access. MITRE T1021.001.",
+    "rule_id": "soc-lm-006",
+    "enabled": true,
+    "risk_score": 47,
+    "severity": "medium",
+    "type": "query",
+    "language": "kuery",
+    "query": "event.code:\"4624\" and winlog.event_data.LogonType:\"10\" and not source.ip:(\"127.0.0.1\" or \"::1\")",
+    "index": ["winlogbeat-*", "logs-*"],
+    "interval": "5m",
+    "from": "now-6m",
+    "max_signals": 100,
+    "tags": ["SOC", "Lateral Movement", "RDP", "T1021.001"],
+    "threat": [
+      {
+        "framework": "MITRE ATT&CK",
+        "tactic": {
+          "id": "TA0008",
+          "name": "Lateral Movement",
+          "reference": "https://attack.mitre.org/tactics/TA0008/"
+        },
+        "technique": [
+          {
+            "id": "T1021",
+            "name": "Remote Services",
+            "reference": "https://attack.mitre.org/techniques/T1021/",
+            "subtechnique": [
+              {
+                "id": "T1021.001",
+                "name": "Remote Desktop Protocol",
+                "reference": "https://attack.mitre.org/techniques/T1021/001/"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "actions": []
+  }
+]

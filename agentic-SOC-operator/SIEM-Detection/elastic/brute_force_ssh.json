@@ -1,0 +1,230 @@
+[
+  {
+    "name": "Brute Force: SSH Multiple Failed Logins",
+    "description": "Detects SSH brute force: 10+ failed authentication attempts from the same source IP within 5 minutes. Covers both ECS-native auditbeat/filebeat events and Wazuh alerts forwarded to Elastic. MITRE T1110.001 - Password Guessing.",
+    "rule_id": "soc-bf-001",
+    "enabled": true,
+    "risk_score": 73,
+    "severity": "high",
+    "type": "threshold",
+    "language": "kuery",
+    "query": "(event.category:\"authentication\" and event.outcome:\"failure\" and process.name:(\"sshd\" or \"ssh\")) or (rule.groups:(\"authentication_failed\" or \"authentication_failures\") and rule.level:>=7)",
+    "index": ["auditbeat-*", "filebeat-*", "wazuh-alerts-*", "logs-*"],
+    "threshold": {
+      "field": ["source.ip"],
+      "value": 10
+    },
+    "interval": "5m",
+    "from": "now-6m",
+    "max_signals": 100,
+    "tags": ["SOC", "Credential Access", "Brute Force", "T1110.001"],
+    "threat": [
+      {
+        "framework": "MITRE ATT&CK",
+        "tactic": {
+          "id": "TA0006",
+          "name": "Credential Access",
+          "reference": "https://attack.mitre.org/tactics/TA0006/"
+        },
+        "technique": [
+          {
+            "id": "T1110",
+            "name": "Brute Force",
+            "reference": "https://attack.mitre.org/techniques/T1110/",
+            "subtechnique": [
+              {
+                "id": "T1110.001",
+                "name": "Password Guessing",
+                "reference": "https://attack.mitre.org/techniques/T1110/001/"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "actions": []
+  },
+  {
+    "name": "Brute Force: SSH Escalated Attack (20+ Failures)",
+    "description": "Escalated SSH brute force: 20+ failed auth attempts from the same IP within 5 minutes — indicates an active automated attack in progress. MITRE T1110.001.",
+    "rule_id": "soc-bf-002",
+    "enabled": true,
+    "risk_score": 91,
+    "severity": "critical",
+    "type": "threshold",
+    "language": "kuery",
+    "query": "(event.category:\"authentication\" and event.outcome:\"failure\" and process.name:(\"sshd\" or \"ssh\")) or (rule.groups:(\"authentication_failed\" or \"authentication_failures\") and rule.level:>=10)",
+    "index": ["auditbeat-*", "filebeat-*", "wazuh-alerts-*", "logs-*"],
+    "threshold": {
+      "field": ["source.ip"],
+      "value": 20
+    },
+    "interval": "5m",
+    "from": "now-6m",
+    "max_signals": 100,
+    "tags": ["SOC", "Credential Access", "Brute Force", "T1110.001", "Critical"],
+    "threat": [
+      {
+        "framework": "MITRE ATT&CK",
+        "tactic": {
+          "id": "TA0006",
+          "name": "Credential Access",
+          "reference": "https://attack.mitre.org/tactics/TA0006/"
+        },
+        "technique": [
+          {
+            "id": "T1110",
+            "name": "Brute Force",
+            "reference": "https://attack.mitre.org/techniques/T1110/",
+            "subtechnique": [
+              {
+                "id": "T1110.001",
+                "name": "Password Guessing",
+                "reference": "https://attack.mitre.org/techniques/T1110/001/"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "actions": []
+  },
+  {
+    "name": "Brute Force: Password Spray — Multiple Users from Single IP",
+    "description": "Detects password spraying: one source IP targeting 5+ distinct usernames with auth failures. Indicates a spray attack attempting to avoid per-user lockouts. MITRE T1110.003.",
+    "rule_id": "soc-bf-003",
+    "enabled": true,
+    "risk_score": 73,
+    "severity": "high",
+    "type": "threshold",
+    "language": "kuery",
+    "query": "event.category:\"authentication\" and event.outcome:\"failure\"",
+    "index": ["auditbeat-*", "filebeat-*", "winlogbeat-*", "wazuh-alerts-*", "logs-*"],
+    "threshold": {
+      "field": ["source.ip"],
+      "value": 5,
+      "cardinality": [
+        {
+          "field": "user.name",
+          "value": 5
+        }
+      ]
+    },
+    "interval": "5m",
+    "from": "now-6m",
+    "max_signals": 100,
+    "tags": ["SOC", "Credential Access", "Password Spray", "T1110.003"],
+    "threat": [
+      {
+        "framework": "MITRE ATT&CK",
+        "tactic": {
+          "id": "TA0006",
+          "name": "Credential Access",
+          "reference": "https://attack.mitre.org/tactics/TA0006/"
+        },
+        "technique": [
+          {
+            "id": "T1110",
+            "name": "Brute Force",
+            "reference": "https://attack.mitre.org/techniques/T1110/",
+            "subtechnique": [
+              {
+                "id": "T1110.003",
+                "name": "Password Spraying",
+                "reference": "https://attack.mitre.org/techniques/T1110/003/"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "actions": []
+  },
+  {
+    "name": "Brute Force: SSH Success After Repeated Failures",
+    "description": "EQL sequence: detects a successful SSH login immediately preceded by 5+ failures from the same source IP within 2 minutes. High-confidence indicator of a successfully cracked credential. MITRE T1110.001, T1078.",
+    "rule_id": "soc-bf-004",
+    "enabled": true,
+    "risk_score": 91,
+    "severity": "critical",
+    "type": "eql",
+    "language": "eql",
+    "query": "sequence by source.ip with maxspan=2m\n  [authentication where event.outcome == \"failure\"] with runs=5\n  [authentication where event.outcome == \"success\"]",
+    "index": ["auditbeat-*", "filebeat-*", "logs-*"],
+    "interval": "5m",
+    "from": "now-6m",
+    "max_signals": 100,
+    "tags": ["SOC", "Credential Access", "Valid Accounts", "T1110.001", "T1078", "Critical"],
+    "threat": [
+      {
+        "framework": "MITRE ATT&CK",
+        "tactic": {
+          "id": "TA0006",
+          "name": "Credential Access",
+          "reference": "https://attack.mitre.org/tactics/TA0006/"
+        },
+        "technique": [
+          {
+            "id": "T1110",
+            "name": "Brute Force",
+            "reference": "https://attack.mitre.org/techniques/T1110/",
+            "subtechnique": [
+              {
+                "id": "T1110.001",
+                "name": "Password Guessing",
+                "reference": "https://attack.mitre.org/techniques/T1110/001/"
+              }
+            ]
+          },
+          {
+            "id": "T1078",
+            "name": "Valid Accounts",
+            "reference": "https://attack.mitre.org/techniques/T1078/"
+          }
+        ]
+      }
+    ],
+    "actions": []
+  },
+  {
+    "name": "Brute Force: Direct Root SSH Login",
+    "description": "Detects a successful SSH login as root from an external source. Root SSH should be disabled via PermitRootLogin no in sshd_config. MITRE T1078.003 - Local Accounts.",
+    "rule_id": "soc-bf-005",
+    "enabled": true,
+    "risk_score": 73,
+    "severity": "high",
+    "type": "query",
+    "language": "kuery",
+    "query": "event.category:\"authentication\" and event.outcome:\"success\" and user.name:\"root\" and process.name:(\"sshd\" or \"ssh\")",
+    "index": ["auditbeat-*", "filebeat-*", "logs-*"],
+    "interval": "5m",
+    "from": "now-6m",
+    "max_signals": 100,
+    "tags": ["SOC", "Credential Access", "T1078.003"],
+    "threat": [
+      {
+        "framework": "MITRE ATT&CK",
+        "tactic": {
+          "id": "TA0006",
+          "name": "Credential Access",
+          "reference": "https://attack.mitre.org/tactics/TA0006/"
+        },
+        "technique": [
+          {
+            "id": "T1078",
+            "name": "Valid Accounts",
+            "reference": "https://attack.mitre.org/techniques/T1078/",
+            "subtechnique": [
+              {
+                "id": "T1078.003",
+                "name": "Local Accounts",
+                "reference": "https://attack.mitre.org/techniques/T1078/003/"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "actions": []
+  }
+]

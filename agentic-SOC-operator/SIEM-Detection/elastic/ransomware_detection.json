@@ -1,0 +1,233 @@
+[
+  {
+    "name": "Ransomware: Mass File Encryption — Known Ransomware Extensions",
+    "description": "Detects mass creation of files with known ransomware encryption extensions (.locked, .encrypted, .ryuk, .conti, .lockbit, .blackcat, .wncry). Threshold of 20 within 1 minute indicates encryption sweep in progress. MITRE T1486 - Data Encrypted for Impact.",
+    "rule_id": "soc-rw-001",
+    "enabled": true,
+    "risk_score": 99,
+    "severity": "critical",
+    "type": "threshold",
+    "language": "eql",
+    "query": "file where event.type == \"creation\" and\n  file.extension in (\"locked\", \"encrypted\", \"enc\", \"ryuk\", \"conti\", \"lockbit\", \"blackcat\", \"wncry\", \"ryk\", \"ransom\", \"WNCRYPT\", \"wcry\")",
+    "index": ["logs-endpoint.events.file-*", "winlogbeat-*", "auditbeat-*", "logs-*"],
+    "threshold": {
+      "field": ["host.name"],
+      "value": 20
+    },
+    "interval": "2m",
+    "from": "now-3m",
+    "max_signals": 100,
+    "tags": ["SOC", "Impact", "Ransomware", "T1486", "Critical"],
+    "threat": [
+      {
+        "framework": "MITRE ATT&CK",
+        "tactic": {
+          "id": "TA0040",
+          "name": "Impact",
+          "reference": "https://attack.mitre.org/tactics/TA0040/"
+        },
+        "technique": [
+          {
+            "id": "T1486",
+            "name": "Data Encrypted for Impact",
+            "reference": "https://attack.mitre.org/techniques/T1486/"
+          }
+        ]
+      }
+    ],
+    "actions": []
+  },
+  {
+    "name": "Ransomware: Shadow Copy Deletion — Recovery Inhibition",
+    "description": "Detects vssadmin, wmic, or bcdedit commands used to delete volume shadow copies or disable recovery — the signature pre-encryption step in LockBit, Ryuk, Conti, and BlackCat ransomware. MITRE T1490 - Inhibit System Recovery.",
+    "rule_id": "soc-rw-002",
+    "enabled": true,
+    "risk_score": 99,
+    "severity": "critical",
+    "type": "eql",
+    "language": "eql",
+    "query": "process where event.type == \"start\" and (\n  (process.name == \"vssadmin.exe\" and process.args : (\"delete\", \"shadows\")) or\n  (process.name == \"wmic.exe\" and process.command_line like~ \"*shadowcopy delete*\") or\n  (process.name == \"bcdedit.exe\" and process.args : (\"/set\") and process.command_line like~ \"*recoveryenabled*no*\") or\n  (process.name == \"wbadmin.exe\" and process.args : (\"delete\", \"catalog\", \"backup\"))\n)",
+    "index": ["winlogbeat-*", "logs-endpoint.events.process-*", "logs-*"],
+    "interval": "5m",
+    "from": "now-6m",
+    "max_signals": 100,
+    "tags": ["SOC", "Impact", "Ransomware", "Shadow Copy", "T1490", "Critical"],
+    "threat": [
+      {
+        "framework": "MITRE ATT&CK",
+        "tactic": {
+          "id": "TA0040",
+          "name": "Impact",
+          "reference": "https://attack.mitre.org/tactics/TA0040/"
+        },
+        "technique": [
+          {
+            "id": "T1490",
+            "name": "Inhibit System Recovery",
+            "reference": "https://attack.mitre.org/techniques/T1490/"
+          }
+        ]
+      }
+    ],
+    "actions": []
+  },
+  {
+    "name": "Ransomware: Backup Service Stopped (Pre-Encryption Phase)",
+    "description": "Detects 'net stop' or 'sc stop' targeting Windows Backup, VSS, or SQL Server services — the Ryuk/Conti pre-encryption phase that disables recovery services before deploying encryption. MITRE T1489 - Service Stop.",
+    "rule_id": "soc-rw-003",
+    "enabled": true,
+    "risk_score": 91,
+    "severity": "critical",
+    "type": "eql",
+    "language": "eql",
+    "query": "process where event.type == \"start\" and\n  process.name in (\"net.exe\", \"net1.exe\", \"sc.exe\") and\n  process.args == \"stop\" and\n  process.command_line like~ (\"*backup*\", \"*vss*\", \"*sqlserver*\", \"*MSSQLSERVER*\", \"*BackupExec*\", \"*Veeam*\")",
+    "index": ["winlogbeat-*", "logs-endpoint.events.process-*", "logs-*"],
+    "interval": "5m",
+    "from": "now-6m",
+    "max_signals": 100,
+    "tags": ["SOC", "Impact", "Ransomware", "Service Stop", "T1489", "Critical"],
+    "threat": [
+      {
+        "framework": "MITRE ATT&CK",
+        "tactic": {
+          "id": "TA0040",
+          "name": "Impact",
+          "reference": "https://attack.mitre.org/tactics/TA0040/"
+        },
+        "technique": [
+          {
+            "id": "T1489",
+            "name": "Service Stop",
+            "reference": "https://attack.mitre.org/techniques/T1489/"
+          }
+        ]
+      }
+    ],
+    "actions": []
+  },
+  {
+    "name": "Ransomware: Ransom Note File Created",
+    "description": "Detects creation of files matching common ransom note naming patterns (README, HOW_TO_DECRYPT, RECOVER_FILES). This fires after encryption is complete and data is already at risk. MITRE T1486.",
+    "rule_id": "soc-rw-004",
+    "enabled": true,
+    "risk_score": 99,
+    "severity": "critical",
+    "type": "eql",
+    "language": "eql",
+    "query": "file where event.type == \"creation\" and\n  file.name like~ (\"README*.txt\", \"HOW_TO_DECRYPT*\", \"RECOVER_FILES*\", \"RANSOM_NOTE*\", \"!!!_IMPORTANT_!!!*\", \"_README_*\", \"DECRYPT_INSTRUCTIONS*\")",
+    "index": ["logs-endpoint.events.file-*", "winlogbeat-*", "auditbeat-*", "logs-*"],
+    "interval": "2m",
+    "from": "now-3m",
+    "max_signals": 100,
+    "tags": ["SOC", "Impact", "Ransomware", "Ransom Note", "T1486", "Critical"],
+    "threat": [
+      {
+        "framework": "MITRE ATT&CK",
+        "tactic": {
+          "id": "TA0040",
+          "name": "Impact",
+          "reference": "https://attack.mitre.org/tactics/TA0040/"
+        },
+        "technique": [
+          {
+            "id": "T1486",
+            "name": "Data Encrypted for Impact",
+            "reference": "https://attack.mitre.org/techniques/T1486/"
+          }
+        ]
+      }
+    ],
+    "actions": []
+  },
+  {
+    "name": "Ransomware: Suspicious PowerShell Dropper (Encoded/Hidden/Download)",
+    "description": "EQL sequence: PowerShell launched with EncodedCommand, bypass, or hidden flags that then spawns a network connection — the classic ransomware dropper chain. MITRE T1059.001, T1027.",
+    "rule_id": "soc-rw-005",
+    "enabled": true,
+    "risk_score": 73,
+    "severity": "high",
+    "type": "eql",
+    "language": "eql",
+    "query": "sequence by process.entity_id with maxspan=30s\n  [process where event.type == \"start\" and\n    process.name : (\"powershell.exe\", \"pwsh.exe\") and\n    process.command_line like~ (\"*-EncodedCommand*\", \"*-enc *\", \"*-e *\", \"*-bypass*\", \"*hidden*\", \"*IEX*\", \"*Invoke-Expression*\", \"*DownloadString*\", \"*WebClient*\")]\n  [network where event.type == \"start\" and\n    not destination.ip : (\"127.0.0.1\", \"::1\", \"169.254.*\")]",
+    "index": ["winlogbeat-*", "logs-endpoint.events.*", "logs-*"],
+    "interval": "5m",
+    "from": "now-6m",
+    "max_signals": 100,
+    "tags": ["SOC", "Execution", "Ransomware", "PowerShell", "T1059.001", "T1027"],
+    "threat": [
+      {
+        "framework": "MITRE ATT&CK",
+        "tactic": {
+          "id": "TA0002",
+          "name": "Execution",
+          "reference": "https://attack.mitre.org/tactics/TA0002/"
+        },
+        "technique": [
+          {
+            "id": "T1059",
+            "name": "Command and Scripting Interpreter",
+            "reference": "https://attack.mitre.org/techniques/T1059/",
+            "subtechnique": [
+              {
+                "id": "T1059.001",
+                "name": "PowerShell",
+                "reference": "https://attack.mitre.org/techniques/T1059/001/"
+              }
+            ]
+          },
+          {
+            "id": "T1027",
+            "name": "Obfuscated Files or Information",
+            "reference": "https://attack.mitre.org/techniques/T1027/"
+          }
+        ]
+      }
+    ],
+    "actions": []
+  },
+  {
+    "name": "Ransomware: Mass Process Termination (AV/EDR Kill Phase)",
+    "description": "Detects 10+ consecutive taskkill /f executions within 30 seconds — ransomware operators systematically kill AV, EDR, and backup agents immediately before deploying encryption. MITRE T1562.001 - Disable or Modify Tools.",
+    "rule_id": "soc-rw-006",
+    "enabled": true,
+    "risk_score": 73,
+    "severity": "high",
+    "type": "threshold",
+    "language": "eql",
+    "query": "process where event.type == \"start\" and\n  process.name == \"taskkill.exe\" and\n  process.args : \"/f\"",
+    "index": ["winlogbeat-*", "logs-endpoint.events.process-*", "logs-*"],
+    "threshold": {
+      "field": ["host.name"],
+      "value": 10
+    },
+    "interval": "2m",
+    "from": "now-3m",
+    "max_signals": 100,
+    "tags": ["SOC", "Defense Evasion", "Ransomware", "Process Kill", "T1562.001"],
+    "threat": [
+      {
+        "framework": "MITRE ATT&CK",
+        "tactic": {
+          "id": "TA0005",
+          "name": "Defense Evasion",
+          "reference": "https://attack.mitre.org/tactics/TA0005/"
+        },
+        "technique": [
+          {
+            "id": "T1562",
+            "name": "Impair Defenses",
+            "reference": "https://attack.mitre.org/techniques/T1562/",
+            "subtechnique": [
+              {
+                "id": "T1562.001",
+                "name": "Disable or Modify Tools",
+                "reference": "https://attack.mitre.org/techniques/T1562/001/"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "actions": []
+  }
+]

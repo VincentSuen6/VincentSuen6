@@ -1,0 +1,205 @@
+[
+  {
+    "name": "Privilege Escalation: SUID/SGID Bit Set on System Binary",
+    "description": "Detects when the SUID or SGID bit is set on a system binary in /bin, /sbin, /usr/bin, or /usr/sbin. Attackers set SUID to maintain elevated execution. MITRE T1548.001 - Setuid and Setgid.",
+    "rule_id": "soc-pe-001",
+    "enabled": true,
+    "risk_score": 73,
+    "severity": "high",
+    "type": "eql",
+    "language": "eql",
+    "query": "file where event.action in (\"changed-file-permissions\", \"chmod\") and\n  file.path : (\"/bin/*\", \"/sbin/*\", \"/usr/bin/*\", \"/usr/sbin/*\") and\n  process.name != \"dpkg\" and process.name != \"rpm\" and process.name != \"apt\"",
+    "index": ["auditbeat-*", "logs-endpoint.events.file-*", "logs-*"],
+    "interval": "5m",
+    "from": "now-6m",
+    "max_signals": 100,
+    "tags": ["SOC", "Privilege Escalation", "SUID", "T1548.001"],
+    "threat": [
+      {
+        "framework": "MITRE ATT&CK",
+        "tactic": {
+          "id": "TA0004",
+          "name": "Privilege Escalation",
+          "reference": "https://attack.mitre.org/tactics/TA0004/"
+        },
+        "technique": [
+          {
+            "id": "T1548",
+            "name": "Abuse Elevation Control Mechanism",
+            "reference": "https://attack.mitre.org/techniques/T1548/",
+            "subtechnique": [
+              {
+                "id": "T1548.001",
+                "name": "Setuid and Setgid",
+                "reference": "https://attack.mitre.org/techniques/T1548/001/"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "actions": []
+  },
+  {
+    "name": "Privilege Escalation: Sudo Shell Escape Attempt",
+    "description": "Detects sudo invocations that spawn an interactive shell (bash, sh, python, perl, etc.) — a common GTFOBins technique to escape to a root shell. MITRE T1548.003 - Sudo and Sudo Caching Abuse.",
+    "rule_id": "soc-pe-002",
+    "enabled": true,
+    "risk_score": 73,
+    "severity": "high",
+    "type": "eql",
+    "language": "eql",
+    "query": "process where event.type == \"start\" and\n  process.parent.name == \"sudo\" and\n  process.name in (\"bash\", \"sh\", \"zsh\", \"fish\", \"python\", \"python3\", \"perl\", \"ruby\", \"vi\", \"vim\", \"less\", \"more\", \"awk\", \"nmap\")",
+    "index": ["auditbeat-*", "logs-endpoint.events.process-*", "logs-*"],
+    "interval": "5m",
+    "from": "now-6m",
+    "max_signals": 100,
+    "tags": ["SOC", "Privilege Escalation", "Sudo Abuse", "T1548.003"],
+    "threat": [
+      {
+        "framework": "MITRE ATT&CK",
+        "tactic": {
+          "id": "TA0004",
+          "name": "Privilege Escalation",
+          "reference": "https://attack.mitre.org/tactics/TA0004/"
+        },
+        "technique": [
+          {
+            "id": "T1548",
+            "name": "Abuse Elevation Control Mechanism",
+            "reference": "https://attack.mitre.org/techniques/T1548/",
+            "subtechnique": [
+              {
+                "id": "T1548.003",
+                "name": "Sudo and Sudo Caching Abuse",
+                "reference": "https://attack.mitre.org/techniques/T1548/003/"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "actions": []
+  },
+  {
+    "name": "Privilege Escalation: User Added to Privileged Group",
+    "description": "Detects a user being added to sudoers, wheel, or admin group. This is a common persistence and privilege escalation technique used after initial compromise. MITRE T1098 - Account Manipulation.",
+    "rule_id": "soc-pe-003",
+    "enabled": true,
+    "risk_score": 73,
+    "severity": "high",
+    "type": "eql",
+    "language": "eql",
+    "query": "process where event.type == \"start\" and\n  process.name in (\"usermod\", \"gpasswd\", \"adduser\", \"net\") and\n  process.args : (\"*sudo*\", \"*wheel*\", \"*admin*\", \"-aG sudo\", \"-aG wheel\")",
+    "index": ["auditbeat-*", "logs-endpoint.events.process-*", "logs-*"],
+    "interval": "5m",
+    "from": "now-6m",
+    "max_signals": 100,
+    "tags": ["SOC", "Privilege Escalation", "Account Manipulation", "T1098"],
+    "threat": [
+      {
+        "framework": "MITRE ATT&CK",
+        "tactic": {
+          "id": "TA0004",
+          "name": "Privilege Escalation",
+          "reference": "https://attack.mitre.org/tactics/TA0004/"
+        },
+        "technique": [
+          {
+            "id": "T1098",
+            "name": "Account Manipulation",
+            "reference": "https://attack.mitre.org/techniques/T1098/"
+          }
+        ]
+      }
+    ],
+    "actions": []
+  },
+  {
+    "name": "Privilege Escalation: Critical Auth File Modified (/etc/passwd, /etc/shadow)",
+    "description": "Detects modification of /etc/passwd, /etc/shadow, or /etc/group — the core Linux account database. Attackers modify these to add backdoor accounts or change root password. MITRE T1136.001, T1531.",
+    "rule_id": "soc-pe-004",
+    "enabled": true,
+    "risk_score": 91,
+    "severity": "critical",
+    "type": "eql",
+    "language": "eql",
+    "query": "file where event.action in (\"changed-file-content\", \"overwrite\", \"rename\") and\n  file.path in (\"/etc/passwd\", \"/etc/shadow\", \"/etc/group\", \"/etc/gshadow\") and\n  not process.name in (\"passwd\", \"shadow\", \"chpasswd\", \"useradd\", \"usermod\", \"userdel\")",
+    "index": ["auditbeat-*", "logs-endpoint.events.file-*", "logs-*"],
+    "interval": "5m",
+    "from": "now-6m",
+    "max_signals": 100,
+    "tags": ["SOC", "Privilege Escalation", "Account Manipulation", "T1136.001", "T1531", "Critical"],
+    "threat": [
+      {
+        "framework": "MITRE ATT&CK",
+        "tactic": {
+          "id": "TA0004",
+          "name": "Privilege Escalation",
+          "reference": "https://attack.mitre.org/tactics/TA0004/"
+        },
+        "technique": [
+          {
+            "id": "T1136",
+            "name": "Create Account",
+            "reference": "https://attack.mitre.org/techniques/T1136/",
+            "subtechnique": [
+              {
+                "id": "T1136.001",
+                "name": "Local Account",
+                "reference": "https://attack.mitre.org/techniques/T1136/001/"
+              }
+            ]
+          },
+          {
+            "id": "T1531",
+            "name": "Account Access Removal",
+            "reference": "https://attack.mitre.org/techniques/T1531/"
+          }
+        ]
+      }
+    ],
+    "actions": []
+  },
+  {
+    "name": "Privilege Escalation: Kernel Module Loaded (Rootkit Indicator)",
+    "description": "Detects insmod, modprobe, or rmmod execution by a non-root process. Kernel module loading is a primary rootkit installation technique. MITRE T1547.006 - Kernel Modules and Extensions.",
+    "rule_id": "soc-pe-005",
+    "enabled": true,
+    "risk_score": 91,
+    "severity": "critical",
+    "type": "eql",
+    "language": "eql",
+    "query": "process where event.type == \"start\" and\n  process.name in (\"insmod\", \"modprobe\", \"rmmod\") and\n  not process.parent.name in (\"systemd\", \"update-initramfs\", \"dracut\")",
+    "index": ["auditbeat-*", "logs-endpoint.events.process-*", "logs-*"],
+    "interval": "5m",
+    "from": "now-6m",
+    "max_signals": 100,
+    "tags": ["SOC", "Privilege Escalation", "Persistence", "Rootkit", "T1547.006", "Critical"],
+    "threat": [
+      {
+        "framework": "MITRE ATT&CK",
+        "tactic": {
+          "id": "TA0004",
+          "name": "Privilege Escalation",
+          "reference": "https://attack.mitre.org/tactics/TA0004/"
+        },
+        "technique": [
+          {
+            "id": "T1547",
+            "name": "Boot or Logon Autostart Execution",
+            "reference": "https://attack.mitre.org/techniques/T1547/",
+            "subtechnique": [
+              {
+                "id": "T1547.006",
+                "name": "Kernel Modules and Extensions",
+                "reference": "https://attack.mitre.org/techniques/T1547/006/"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "actions": []
+  }
+]
