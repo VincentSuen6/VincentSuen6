@@ -1,22 +1,32 @@
 """
 soar_graph.py — LangGraph SOAR State Machine
 =============================================
-Three-node deterministic LangGraph graph for real-time alert triage,
-threat intelligence lookup, and remediation command generation.
+Six-node deterministic LangGraph graph for real-time alert triage,
+threat intelligence, MITRE ATT&CK mapping, autonomous containment,
+and human-readable executive summary with Discord/Slack notification.
 
 Flow
 ────
   raw_alert
       │
       ▼
-  [Node 1] TriageIngestion   — classify alert type, score priority
+  [Node 1] TriageIngestion      — classify alert type, score priority
       │
       ▼
-  [Node 2] ThreatIntel       — IP/hash reputation, internal blacklist
+  [Node 2] ThreatIntel          — AbuseIPDB + internal blacklist
       │
       ▼
   [Node 3] RemediationArchitect — deterministic command from allowlist
-      │                           or escalates to Claude if needed
+      │
+      ▼
+  [Node 4] MitreMapping         — Claude maps to ATT&CK tactic/technique
+      │
+      ▼
+  [Node 5] AutonomousContainment — execute command or Claude-escalate
+      │
+      ▼
+  [Node 6] MarkdownSummary      — executive brief → Discord/Slack
+      │
       ▼
      END
 
@@ -95,6 +105,17 @@ ALLOWED_CMD_PREFIXES = (
     "aws s3api",
     "chkrootkit",
 )
+
+DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK_URL", "")
+SLACK_WEBHOOK   = os.getenv("SLACK_WEBHOOK_URL", "")
+
+# Severity → Discord embed colour (decimal)
+_DISCORD_COLOURS = {
+    "CRITICAL": 10038562,   # dark red
+    "HIGH":     15158332,   # red
+    "MEDIUM":   16776960,   # yellow
+    "LOW":      3066993,    # green
+}
 
 
 # ── Node 1: Triage Ingestion Agent ────────────────────────────────────────────
@@ -300,19 +321,312 @@ def remediation_architect_node(state: SOCAgentState) -> Dict:
     }
 
 
+# ── Node 4: MITRE ATT&CK Mapping ─────────────────────────────────────────────
+
+_MITRE_CACHE: dict[str, dict] = {}   # simple in-process cache to avoid duplicate API calls
+
+def mitre_mapping_node(state: SOCAgentState) -> Dict:
+    """
+    Maps the threat category + alert description to a MITRE ATT&CK
+    tactic and technique using Claude.  Falls back to a deterministic
+    lookup table for common categories so the node works even without
+    an API key.
+    """
+    print("[SOAR Node 4] MitreMapping — correlating to ATT&CK framework...")
+
+    category = state["threat_category"]
+    desc     = state["description"]
+    rule_id  = state["rule_id"]
+
+    # ── Deterministic fallback map ─────────────────────────────────────────────
+    _STATIC: dict[str, tuple] = {
+        "BRUTE_FORCE":          ("TA0006", "Credential Access",    "T1110.001", "Password Guessing"),
+        "FILE_TAMPER":          ("TA0040", "Impact",               "T1565.001", "Stored Data Manipulation"),
+        "PRIVILEGE_ESCALATION": ("TA0004", "Privilege Escalation", "T1548.003", "Sudo and Sudo Caching Abuse"),
+        "LATERAL_MOVEMENT":     ("TA0008", "Lateral Movement",     "T1021.002", "SMB/Windows Admin Shares"),
+        "WEB_ATTACK":           ("TA0001", "Initial Access",       "T1190",     "Exploit Public-Facing Application"),
+        "MALWARE":              ("TA0002", "Execution",            "T1059",     "Command and Scripting Interpreter"),
+        "ROOTKIT":              ("TA0004", "Privilege Escalation", "T1547.006", "Kernel Modules and Extensions"),
+        "RECON":                ("TA0043", "Reconnaissance",       "T1595",     "Active Scanning"),
+        "NETWORK_ANOMALY":      ("TA0011", "Command and Control",  "T1071",     "Application Layer Protocol"),
+        "CLOUD_MISCONFIGURATION":("TA0001","Initial Access",       "T1190",     "Exploit Public-Facing Application"),
+    }
+
+    # Check cache first
+    cache_key = f"{category}-{rule_id}"
+    if cache_key in _MITRE_CACHE:
+        cached = _MITRE_CACHE[cache_key]
+        print(f"           [cache hit] {cached['mitre_technique']} — {cached['mitre_technique_name']}")
+        return cached
+
+    # Try Claude for richer context if API key available
+    if ANTHROPIC_KEY:
+        try:
+            import anthropic
+            client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+            prompt = f"""You are a MITRE ATT&CK expert. Given this security alert, identify the single best-matching ATT&CK technique.
+
+Alert category : {category}
+Alert description: {desc}
+Wazuh rule ID  : {rule_id}
+
+Return ONLY this JSON (no markdown, no explanation):
+{{
+  "tactic_id":        "TA00XX",
+  "tactic_name":      "...",
+  "technique_id":     "TXXXX.XXX",
+  "technique_name":   "...",
+  "attack_chain":     ["Initial Access", "Execution", "..."]
+}}"""
+            r = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=256,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = r.content[0].text.strip()
+            if text.startswith("```"):
+                text = text.split("```")[1].lstrip("json").strip()
+            data = json.loads(text)
+
+            result = {
+                "mitre_tactic":         data.get("tactic_name", ""),
+                "mitre_tactic_id":      data.get("tactic_id", ""),
+                "mitre_technique":      data.get("technique_id", ""),
+                "mitre_technique_name": data.get("technique_name", ""),
+                "attack_chain":         data.get("attack_chain", []),
+            }
+            _MITRE_CACHE[cache_key] = result
+            print(f"           {result['mitre_technique']} — {result['mitre_technique_name']}")
+            return result
+
+        except Exception as e:
+            print(f"           Claude MITRE lookup failed ({e}), using static map")
+
+    # Static fallback
+    row = _STATIC.get(category, ("TA0001", "Initial Access", "T1190", "Exploit Public-Facing Application"))
+    result = {
+        "mitre_tactic":         row[1],
+        "mitre_tactic_id":      row[0],
+        "mitre_technique":      row[2],
+        "mitre_technique_name": row[3],
+        "attack_chain":         [row[1]],
+    }
+    _MITRE_CACHE[cache_key] = result
+    print(f"           [static] {result['mitre_technique']} — {result['mitre_technique_name']}")
+    return result
+
+
+# ── Node 5: Autonomous Containment ────────────────────────────────────────────
+
+def autonomous_containment_node(state: SOCAgentState) -> Dict:
+    """
+    Executes the remediation command determined by RemediationArchitect.
+    If requires_claude=True, first asks Claude for an enhanced command,
+    then executes whichever command has higher confidence.
+
+    This node is the "closed-loop" part of the SOAR pipeline — it is
+    where automated containment actually happens.
+    """
+    print("[SOAR Node 5] AutonomousContainment — executing response...")
+
+    command         = state["remediation_command"]
+    requires_claude = state["requires_claude"]
+    claude_report: dict = {}
+
+    # Claude escalation path: override command with Claude's recommendation
+    if requires_claude and ANTHROPIC_KEY:
+        print("           Escalating to Claude AI Analyst for enhanced command...")
+        claude_report = _claude_escalate(state)
+        if not claude_report.get("error") and claude_report.get("remediation_command"):
+            command = claude_report["remediation_command"]
+            print(f"           Claude override: {command[:80]}")
+
+    exec_result = _execute(command)
+
+    if exec_result.get("dry_run"):
+        status = "DRY_RUN"
+    elif exec_result.get("blocked"):
+        status = "BLOCKED"
+    elif exec_result.get("success"):
+        status = "CONTAINED"
+    elif exec_result.get("executed"):
+        status = "FAILED"
+    else:
+        status = "ESCALATED" if requires_claude else "FAILED"
+
+    print(f"           Status={status}  command={command[:60]}")
+
+    return {
+        "remediation_command":   command,          # may have been upgraded by Claude
+        "execution_result":      exec_result,
+        "execution_verified":    exec_result.get("success", False) or exec_result.get("dry_run", False),
+        "containment_status":    status,
+        "claude_report":         claude_report,
+    }
+
+
+# ── Node 6: Markdown Summary & Notification ───────────────────────────────────
+
+def markdown_summary_node(state: SOCAgentState) -> Dict:
+    """
+    Generates a human-readable executive brief using Claude (or a template
+    fallback), then pushes it to Discord and/or Slack webhooks.
+
+    The Markdown output is also stored in state for the audit trail.
+    """
+    print("[SOAR Node 6] MarkdownSummary — generating executive brief...")
+
+    priority   = state["priority"]
+    category   = state["threat_category"]
+    src_ip     = state["src_ip"] or "N/A"
+    technique  = state["mitre_technique"]
+    tactic     = state["mitre_tactic"]
+    command    = state["remediation_command"]
+    status     = state["containment_status"]
+    incident   = state["incident_id"]
+    abuse      = state["abuse_score"]
+    description = state["description"]
+
+    # ── Generate Markdown via Claude ──────────────────────────────────────────
+    markdown = ""
+    if ANTHROPIC_KEY:
+        try:
+            import anthropic
+            client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+            prompt = f"""You are a SOC analyst writing a concise incident brief for the security team.
+Write a professional, scannable Markdown summary (max 200 words) for this incident.
+Use bold headers and bullet points. Do NOT use triple-backtick code fences.
+
+Incident data:
+- ID          : {incident}
+- Category    : {category}
+- Priority    : {priority}
+- Source IP   : {src_ip} (AbuseIPDB: {abuse})
+- Description : {description}
+- MITRE       : {technique} — {tactic}
+- Containment : {command}
+- Status      : {status}
+
+Write the brief now:"""
+            r = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=512,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            markdown = r.content[0].text.strip()
+        except Exception as e:
+            print(f"           Claude summary failed ({e}), using template")
+
+    # ── Template fallback ─────────────────────────────────────────────────────
+    if not markdown:
+        icon = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", "LOW": "🟢"}.get(priority, "⚪")
+        cs   = {"CONTAINED": "✅", "DRY_RUN": "🔵", "BLOCKED": "⛔", "FAILED": "❌", "ESCALATED": "🤖"}.get(status, "❓")
+        markdown = f"""{icon} **SOC Incident — {category} [{priority}]**
+
+**Incident ID:** `{incident}`
+**Source IP:** `{src_ip}` — AbuseIPDB confidence: {abuse}
+**Alert:** {description}
+
+**MITRE ATT&CK**
+- Tactic: {tactic}
+- Technique: `{technique}`
+
+**Containment**
+- Command: `{command}`
+- Status: {cs} {status}"""
+
+    print(f"           Brief generated ({len(markdown)} chars)")
+
+    # ── Discord notification ───────────────────────────────────────────────────
+    channels_notified: list[str] = []
+
+    if DISCORD_WEBHOOK:
+        try:
+            colour = _DISCORD_COLOURS.get(priority, 3066993)
+            discord_payload = {
+                "embeds": [{
+                    "title":       f"SOC Alert — {category} [{priority}]",
+                    "description": markdown[:2048],
+                    "color":       colour,
+                    "fields": [
+                        {"name": "MITRE Technique",  "value": f"`{technique}` {tactic}", "inline": True},
+                        {"name": "Source IP",        "value": f"`{src_ip}`",             "inline": True},
+                        {"name": "Containment",      "value": status,                   "inline": True},
+                        {"name": "Incident ID",      "value": f"`{incident}`",           "inline": False},
+                    ],
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "footer": {"text": "Agentic SOC Operator"},
+                }]
+            }
+            r = requests.post(DISCORD_WEBHOOK, json=discord_payload, timeout=10)
+            if r.status_code in (200, 204):
+                channels_notified.append("discord")
+                print("           Discord notification sent")
+            else:
+                print(f"           Discord failed: {r.status_code}")
+        except Exception as e:
+            print(f"           Discord error: {e}")
+
+    # ── Slack notification ────────────────────────────────────────────────────
+    if SLACK_WEBHOOK:
+        try:
+            slack_payload = {
+                "blocks": [
+                    {
+                        "type": "header",
+                        "text": {"type": "plain_text", "text": f"SOC Alert — {category} [{priority}]"},
+                    },
+                    {
+                        "type": "section",
+                        "text": {"type": "mrkdwn", "text": markdown[:3000]},
+                    },
+                    {
+                        "type": "context",
+                        "elements": [{"type": "mrkdwn", "text": f"Incident `{incident}` | Containment: *{status}*"}],
+                    },
+                ]
+            }
+            r = requests.post(SLACK_WEBHOOK, json=slack_payload, timeout=10)
+            if r.status_code == 200:
+                channels_notified.append("slack")
+                print("           Slack notification sent")
+            else:
+                print(f"           Slack failed: {r.status_code}")
+        except Exception as e:
+            print(f"           Slack error: {e}")
+
+    if not channels_notified:
+        print("           No webhooks configured (set DISCORD_WEBHOOK_URL or SLACK_WEBHOOK_URL)")
+
+    channel_str = "+".join(channels_notified) if channels_notified else "none"
+
+    return {
+        "summary_markdown":    markdown,
+        "notification_sent":   bool(channels_notified),
+        "notification_channel": channel_str,
+        "audit_logged":        False,   # audit written by run_soar_graph after graph completes
+    }
+
+
 # ── Graph assembly ─────────────────────────────────────────────────────────────
 
 def build_soar_graph() -> StateGraph:
     builder = StateGraph(SOCAgentState)
 
-    builder.add_node("TriageIngestion",      triage_ingestion_node)
-    builder.add_node("ThreatIntel",          threat_intel_node)
-    builder.add_node("RemediationArchitect", remediation_architect_node)
+    builder.add_node("TriageIngestion",       triage_ingestion_node)
+    builder.add_node("ThreatIntel",           threat_intel_node)
+    builder.add_node("RemediationArchitect",  remediation_architect_node)
+    builder.add_node("MitreMapping",          mitre_mapping_node)
+    builder.add_node("AutonomousContainment", autonomous_containment_node)
+    builder.add_node("MarkdownSummary",       markdown_summary_node)
 
     builder.set_entry_point("TriageIngestion")
-    builder.add_edge("TriageIngestion",      "ThreatIntel")
-    builder.add_edge("ThreatIntel",          "RemediationArchitect")
-    builder.add_edge("RemediationArchitect", END)
+    builder.add_edge("TriageIngestion",       "ThreatIntel")
+    builder.add_edge("ThreatIntel",           "RemediationArchitect")
+    builder.add_edge("RemediationArchitect",  "MitreMapping")
+    builder.add_edge("MitreMapping",          "AutonomousContainment")
+    builder.add_edge("AutonomousContainment", "MarkdownSummary")
+    builder.add_edge("MarkdownSummary",       END)
 
     return builder.compile()
 
@@ -322,16 +636,27 @@ def build_soar_graph() -> StateGraph:
 def _blank_state(alert: dict) -> SOCAgentState:
     return SOCAgentState(
         raw_alert=alert,
+        # Node 1
         threat_category="", alert_source="", priority="", src_ip="",
-        rule_id="", description="",
+        rule_id="", description="", incident_id="",
+        # Node 2
         enrichment_metadata={}, ip_is_malicious=False,
         abuse_score="0%", in_internal_blacklist=False,
+        # Node 3
         remediation_command="", remediation_rationale="",
         requires_claude=False, confidence="",
+        # Node 4
+        mitre_tactic="", mitre_tactic_id="",
+        mitre_technique="", mitre_technique_name="",
+        attack_chain=[],
+        # Node 5
         execution_result={}, execution_verified=False,
-        claude_report={},
-        incident_id="", audit_logged=False,
-        errors=[],
+        containment_status="", claude_report={},
+        # Node 6
+        summary_markdown="", notification_sent=False,
+        notification_channel="none",
+        # Audit
+        audit_logged=False, errors=[],
     )
 
 
@@ -403,17 +728,23 @@ Return JSON only:
 
 def _write_audit(state: SOCAgentState, exec_result: dict) -> None:
     entry = {
-        "logged_at":   datetime.now(timezone.utc).isoformat(),
-        "incident_id": state["incident_id"],
-        "category":    state["threat_category"],
-        "priority":    state["priority"],
-        "source":      state["alert_source"],
-        "command":     state["remediation_command"],
-        "confidence":  state["confidence"],
-        "escalated":   state["requires_claude"],
-        "claude":      state.get("claude_report", {}),
-        "execution":   exec_result,
-        "enrichment":  state["enrichment_metadata"],
+        "logged_at":          datetime.now(timezone.utc).isoformat(),
+        "incident_id":        state["incident_id"],
+        "category":           state["threat_category"],
+        "priority":           state["priority"],
+        "source":             state["alert_source"],
+        "src_ip":             state["src_ip"],
+        "mitre_technique":    state.get("mitre_technique", ""),
+        "mitre_tactic":       state.get("mitre_tactic", ""),
+        "attack_chain":       state.get("attack_chain", []),
+        "command":            state["remediation_command"],
+        "containment_status": state.get("containment_status", ""),
+        "confidence":         state["confidence"],
+        "escalated":          state["requires_claude"],
+        "claude":             state.get("claude_report", {}),
+        "execution":          exec_result,
+        "enrichment":         state["enrichment_metadata"],
+        "notification":       state.get("notification_channel", "none"),
     }
     AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
     with open(AUDIT_LOG, "a") as f:
@@ -428,45 +759,30 @@ _graph = build_soar_graph()
 
 def run_soar_graph(alert: dict) -> SOCAgentState:
     """
-    Run the full 3-node SOAR graph against a single alert dict.
-    Executes remediation (respecting DRY_RUN), escalates to Claude if needed,
-    writes audit entry, and returns the final state.
+    Run the full 6-node SOAR graph against a single alert dict.
+    Execution, Claude escalation, and Discord/Slack notification all
+    happen inside the graph nodes — this function just invokes and audits.
     """
-    print(f"\n{'='*56}")
-    print(f"  SOAR GRAPH — Injecting alert into state machine")
-    print(f"{'='*56}")
+    print(f"\n{'='*60}")
+    print(f"  SOAR GRAPH — 6-node pipeline starting")
+    print(f"{'='*60}")
 
     state: SOCAgentState = _graph.invoke(_blank_state(alert))
 
-    # Claude escalation for complex cases
-    if state["requires_claude"] and ANTHROPIC_KEY:
-        print("[SOAR] Escalating to Claude AI Analyst...")
-        claude_report = _claude_escalate(state)
-        state = dict(state)
-        state["claude_report"] = claude_report
-        # Use Claude's command if better
-        if claude_report.get("remediation_command") and not claude_report.get("error"):
-            state["remediation_command"] = claude_report["remediation_command"]
-            print(f"[SOAR] Claude override: {claude_report['remediation_command'][:80]}")
-
-    # Execute
-    exec_result = _execute(state["remediation_command"])
+    # Write audit trail
+    _write_audit(state, state.get("execution_result", {}))
     state = dict(state)
-    state["execution_result"]   = exec_result
-    state["execution_verified"] = exec_result.get("success", False) or exec_result.get("dry_run", False)
-
-    # Audit
-    _write_audit(state, exec_result)
     state["audit_logged"] = True
 
-    # Summary
     print(f"\n  INCIDENT  : {state['incident_id']}")
     print(f"  CATEGORY  : {state['threat_category']}")
     print(f"  PRIORITY  : {state['priority']}")
     print(f"  IP        : {state['src_ip'] or 'N/A'}  MALICIOUS={state['ip_is_malicious']}")
+    print(f"  MITRE     : {state['mitre_technique']} — {state['mitre_technique_name']}")
     print(f"  COMMAND   : {state['remediation_command'][:70]}")
-    print(f"  CONFIDENCE: {state['confidence']}  ESCALATED={state['requires_claude']}")
-    print(f"{'='*56}\n")
+    print(f"  CONTAINED : {state['containment_status']}")
+    print(f"  NOTIFIED  : {state['notification_channel']}")
+    print(f"{'='*60}\n")
 
     return state
 

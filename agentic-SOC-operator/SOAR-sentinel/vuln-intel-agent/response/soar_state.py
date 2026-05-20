@@ -19,6 +19,7 @@ class SOCAgentState(TypedDict):
     src_ip: str              # primary source IP (empty string if none)
     rule_id: str
     description: str
+    incident_id: str
 
     # ── Node 2: ThreatIntel outputs ────────────────────────────────────────────
     enrichment_metadata: dict   # AbuseIPDB score, internal blacklist, VT hits, …
@@ -32,14 +33,24 @@ class SOCAgentState(TypedDict):
     requires_claude: bool       # True → escalate to Claude for deep reasoning
     confidence: str             # HIGH | MEDIUM | LOW (deterministic path confidence)
 
-    # ── Execution tracking ─────────────────────────────────────────────────────
-    execution_result: dict
-    execution_verified: bool
+    # ── Node 4: MitreMapping outputs ───────────────────────────────────────────
+    mitre_tactic: str           # e.g. "Credential Access"
+    mitre_tactic_id: str        # e.g. "TA0006"
+    mitre_technique: str        # e.g. "T1110.001"
+    mitre_technique_name: str   # e.g. "Password Guessing"
+    attack_chain: List[str]     # ordered ATT&CK phases observed in this alert
 
-    # ── Claude deep analysis (populated when requires_claude=True) ─────────────
-    claude_report: dict
+    # ── Node 5: AutonomousContainment outputs ──────────────────────────────────
+    execution_result: dict      # subprocess stdout/returncode/success
+    execution_verified: bool
+    containment_status: str     # CONTAINED | DRY_RUN | BLOCKED | FAILED | ESCALATED
+    claude_report: dict         # populated when requires_claude=True
+
+    # ── Node 6: MarkdownSummary outputs ────────────────────────────────────────
+    summary_markdown: str       # full executive brief (Markdown)
+    notification_sent: bool
+    notification_channel: str   # "discord" | "slack" | "both" | "none"
 
     # ── Audit ──────────────────────────────────────────────────────────────────
-    incident_id: str
     audit_logged: bool
     errors: List[str]

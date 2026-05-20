@@ -1,0 +1,9 @@
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+requests>=2.31.0
+python-dotenv>=1.0.0
+urllib3>=2.0.0
+# The SOAR graph dependencies are installed in the parent venv;
+# if running soar-hub in its own venv, also install:
+# anthropic>=0.40.0
+# langgraph>=0.2.0
