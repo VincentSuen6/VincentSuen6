@@ -1,105 +1,57 @@
-"""
-main.py — SOAR Hub FastAPI Entry Point
-=======================================
-Receives alert payloads from elastic_puller.py (and optionally from the
-Wazuh integration block) and routes each one through the extended 6-node
-LangGraph SOAR graph.
-
-Run on your Ubuntu VM (separate terminal from elastic_puller.py):
-    cd ~/VincentSuen6/agentic-SOC-operator/soar-hub
-    source venv/bin/activate
-    uvicorn main:app --host 0.0.0.0 --port 8000 --reload
-
-Endpoints:
-    POST /alerts   — ingest an alert (from elastic_puller or Wazuh integration)
-    GET  /health   — liveness check
-    GET  /status   — pipeline stats + config summary
-    POST /test     — inject a synthetic alert for smoke-testing
-"""
-
-import json
-import sys
-import threading
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any
-
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+import os
+from fastapi import FastAPI, Request
+import uvicorn
 from dotenv import load_dotenv
+from response.soar_graph import compiled_soc_graph
 
 load_dotenv()
 
-# Make the parent project importable from soar-hub/
-sys.path.insert(0, str(Path(__file__).parent.parent / "SOAR-sentinel" / "vuln-intel-agent"))
+app = FastAPI(title="Multi-Vendor Agentic SOAR Hub Framework")
 
-from response.soar_graph import run_soar_graph
-
-app  = FastAPI(title="SOAR Hub", version="2.0")
-_stats: dict[str, int] = {"received": 0, "processed": 0, "errors": 0}
-
-
-def _run(alert: dict):
-    try:
-        run_soar_graph(alert)
-        _stats["processed"] += 1
-    except Exception as e:
-        _stats["errors"] += 1
-        print(f"[Hub] SOAR graph error: {e}")
-
-
-@app.post("/alerts", status_code=202)
-async def receive_alert(request: Request, background_tasks: BackgroundTasks):
-    """
-    Main ingestion endpoint.
-    Returns 202 immediately; SOAR graph runs in a background thread.
-    """
-    try:
-        payload: dict[str, Any] = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON body")
-
-    _stats["received"] += 1
-    desc  = str(payload.get("description", payload.get("rule", {}).get("description", "")))[:60]
-    level = payload.get("rule_level", payload.get("rule", {}).get("level", 0))
-    print(f"[Hub] Received alert — level={level}  {desc}")
-
-    background_tasks.add_task(_run, payload)
-    return {"status": "accepted", "description": desc, "level": level}
-
-
-@app.get("/health")
-async def health():
-    return {"status": "ok", "stats": _stats}
-
-
-@app.get("/status")
-async def status():
-    return {
-        "soar_graph": "6-node (Triage→Intel→MITRE→Remediation→Containment→Summary)",
-        "stats": _stats,
+@app.post("/alerts")
+async def receive_alerts(request: Request):
+    alert_payload = await request.json()
+    print("\n" + "═"*60)
+    print("🚨 [SOAR HUB] INBOUND DATA DETECTED FROM ELASTIC/WAZUH PIPELINE")
+    print("═"*60)
+    
+    # Pack into initial graph dictionary structure
+    initial_input = {
+        "raw_alert": alert_payload, "source_ip": "", "alert_type": "",
+        "threat_intel_score": 0, "mitre_technique_id": "", "mitre_tactic": "",
+        "containment_status": "", "summary_markdown": "", "notification_sent": False, "audit_trail": []
     }
+    
+    # Invoke LangGraph State Engine
+    final_state = compiled_soc_graph.invoke(initial_input)
+    print("═"*60 + "\n")
+    return {"status": "success", "message": "Alert processed through LangGraph.", "containment": final_state.get("containment_status")}
 
-
-@app.post("/test")
-async def test_alert(background_tasks: BackgroundTasks):
-    """Inject a synthetic BRUTE_FORCE alert to smoke-test the full pipeline."""
-    synthetic = {
-        "source": "test",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "rule": {
-            "id": "100200",
-            "level": 12,
-            "description": "SSH brute force: 8+ failed attempts from 45.142.212.100",
-            "groups": ["authentication_failed"],
-            "mitre": {"id": ["T1110.001"], "tactic": ["Credential Access"]},
-        },
-        "agent": {"name": "test-agent"},
-        "data": {"srcip": "45.142.212.100"},
-        "rule_level": 12,
-        "description": "SSH brute force detected",
-        "src_ips": ["45.142.212.100"],
+@app.post("/alerts/splunk")
+async def receive_splunk_webhook(request: Request):
+    splunk_payload = await request.json()
+    print("\n" + "═"*60)
+    print("🚨 [SOAR HUB] INBOUND DATA DETECTED FROM SPLUNK WEBHOOK ENGINE")
+    print("═"*60)
+    
+    result_block = splunk_payload.get("result", {})
+    
+    # Translate Splunk parameters into standard tracking parameters
+    normalized_alert = {
+        "kibana.alert.rule.name": splunk_payload.get("search_name", "Splunk Triggered Rule"),
+        "message": result_block.get("_raw", "Raw Splunk Event Telemetry Logs"),
+        "source": {"ip": result_block.get("src_ip", "185.220.101.5")}
     }
-    _stats["received"] += 1
-    background_tasks.add_task(_run, synthetic)
-    return {"status": "test alert queued", "type": "BRUTE_FORCE", "src_ip": "45.142.212.100"}
+    
+    initial_input = {
+        "raw_alert": normalized_alert, "source_ip": "", "alert_type": "",
+        "threat_intel_score": 0, "mitre_technique_id": "", "mitre_tactic": "",
+        "containment_status": "", "summary_markdown": "", "notification_sent": False, "audit_trail": []
+    }
+    
+    final_state = compiled_soc_graph.invoke(initial_input)
+    print("═"*60 + "\n")
+    return {"status": "success", "message": "Splunk payload normalized and routed.", "containment": final_state.get("containment_status")}
+
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
