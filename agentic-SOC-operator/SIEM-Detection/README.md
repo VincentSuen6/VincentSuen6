@@ -136,3 +136,80 @@ python main.py CVE-2020-1472      # generates Zerologon rules
 ```
 
 Output saved to `vuln-intel-agent/output/siem-rules/`.
+
+---
+
+## Lessons Learned & Architectural Pivot: From Webhooks to API-Driven Polling
+
+> *How a resource-constrained lab environment forced a better engineering decision — and why the result mirrors how enterprise SOAR platforms actually work in production.*
+
+### The Original Design: Kibana Native Action Connectors
+
+The first version of this pipeline leaned heavily on Kibana's built-in tooling. The plan was clean on paper: each Elastic detection rule would fire a **Kibana Action Connector** (Webhook type) on every match, pushing a structured JSON alert payload directly to the FastAPI SOAR endpoint at `POST /alerts`. No polling, no delay — pure event-driven architecture.
+
+It worked beautifully in isolation. One rule, one connector, one alert. The end-to-end latency from detection to LangGraph enrichment was under two seconds.
+
+Then I tried to run the full stack.
+
+### The Wall: Hardware Resource Exhaustion on a Single VM
+
+Running **Elastic Stack** (Elasticsearch + Kibana), **Wazuh Stack** (manager + indexer + dashboard), **Splunk**, and the **LangGraph orchestration engine** simultaneously on a single Ubuntu VM was ambitious. What I didn't fully account for was the *composition* of that load — specifically, Kibana.
+
+Kibana is not a lightweight process. Even at idle, it holds a substantial Node.js V8 heap, pre-initializes every installed plugin, and maintains persistent connections to both Elasticsearch and the browser. Under active use — querying for alerts, evaluating connector triggers, rendering dashboards — it would spike to **60–80% of available RAM** on its own.
+
+The symptoms were ugly:
+
+- **Kibana Action Connectors began silently failing.** The webhook triggers would queue internally but never fire, because Kibana's scheduler couldn't acquire the thread resources needed to dispatch them under memory pressure.
+- **Service deadlocks** emerged between Wazuh's indexer and Elasticsearch. Both compete for the same JVM heap allocations, and with Kibana also demanding memory, the GC pauses cascaded into connection timeouts on both sides.
+- **The LangGraph engine starved.** LLM token generation is CPU-bound. With the SIEM stack fighting over every available core, Claude's inference loop would stall mid-graph — partially enriched alerts sitting frozen in the state machine.
+
+The environment wasn't misconfigured. It was simply doing too much at once, in a way that exposed a fundamental fragility in webhook-driven architectures: **if the sender is degraded, alerts vanish silently**.
+
+### The Realization: The Presentation Layer Was the Bottleneck
+
+The key insight came from watching the resource graphs. Elasticsearch itself — the actual data engine — was stable. CPU was moderate, queries returned in milliseconds, the index was healthy. The problem was entirely in the **presentation layer**: Kibana sat between my Python code and the data it needed, consuming enormous resources just to *render* information that my agent would immediately re-serialize into JSON anyway.
+
+The question reframed itself: *Why is Kibana in this data path at all?*
+
+Elasticsearch exposes a complete, stable, well-documented REST API on port 9201. Every security event, every detection hit, every alert signal — it's all queryable directly, with no browser, no Node.js runtime, and no plugin overhead between the request and the response.
+
+### The Pivot: Bypassing the Presentation Layer Entirely
+
+I replaced the Kibana connector approach with `elastic_puller.py` — a dedicated, lightweight Python polling script that communicates **directly with the Elasticsearch API**, completely bypassing Kibana.
+
+```
+BEFORE (webhook-driven):
+  Elasticsearch → Kibana (connector scheduler) → HTTP POST → FastAPI → LangGraph
+                         ↑
+                   60-80% RAM consumed here
+
+AFTER (API-driven polling):
+  Elasticsearch → elastic_puller.py → FastAPI → LangGraph
+  (REST query, ~0% overhead vs. Kibana's full web stack)
+```
+
+The script runs a time-windowed Elasticsearch query every 30 seconds, pulls only events that haven't been processed yet (tracked by `@timestamp`), normalises each hit into the same internal threat record format the rest of the pipeline already understands, and pushes it to FastAPI — or invokes the enrichment engine directly.
+
+No Kibana. No connector scheduler. No Node.js runtime sitting in the critical path.
+
+### Why This Is Actually the Better Engineering Choice
+
+After making the pivot, I went back and read how enterprise SOAR platforms handle this exact problem. Turns out, I had independently arrived at a well-established pattern.
+
+**Palo Alto Cortex XSOAR** and **Splunk SOAR (Phantom)** both ship Elastic integrations that poll the REST API directly — not through Kibana. Their product teams made the same architectural decision years ago, for the same reasons. Passive webhooks introduce silent failure modes. Active polling gives you control over retry logic, rate limiting, backpressure, and exactly-once semantics.
+
+The specific advantages this pivot delivered:
+
+**Resource efficiency.** Micro-polling via a Python `requests` loop uses a rounding error of CPU and RAM compared to Kibana's full web stack. That headroom went directly back to the LangGraph engine — inference latency dropped noticeably, the state machine no longer stalled mid-graph, and the overall system felt stable for the first time.
+
+**Fault tolerance by design.** A webhook is fire-and-forget: if FastAPI is restarting when Kibana fires the connector, that alert is gone. The polling model inverts this — the puller holds the query cursor, and if the consumer is temporarily unavailable, it simply retries on the next interval with the same timestamp window. Zero alert data loss, no additional message queue required.
+
+**Decoupled architecture.** The presentation layer (Kibana) and the data layer (Elasticsearch) now serve completely separate concerns. Kibana is for human analysts building dashboards and running investigations. Elasticsearch is the data backend that programmatic consumers — like this agent — query directly. This is how microservice architectures are supposed to be structured: each layer speaks only to the layer it needs, not through intermediaries that add overhead without adding value.
+
+**Operational simplicity.** There is no connector to configure through a UI that might break on a Kibana upgrade, no webhook secret to rotate, and no browser session required to verify the integration is working. The puller is a Python process — it can be monitored, restarted, rate-limited, and debugged with standard tooling.
+
+### The Broader Lesson
+
+Resource constraints have a way of forcing good engineering. The single-VM lab environment made it impossible to paper over the cost of architectural choices that a well-provisioned cloud environment would have quietly absorbed. Kibana's overhead was always there — it just didn't matter until every CPU cycle and megabyte of RAM counted.
+
+Building production-grade security tooling on constrained infrastructure turned out to be a more authentic test of the design than running it on unlimited cloud resources would have been. The polling architecture that emerged isn't a workaround — it's the pattern mature SOC platforms converge on, and now I understand exactly why.
