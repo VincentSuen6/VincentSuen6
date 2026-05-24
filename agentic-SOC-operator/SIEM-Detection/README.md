@@ -139,6 +139,66 @@ Output saved to `vuln-intel-agent/output/siem-rules/`.
 
 ---
 
+## Live Pipeline Testing
+
+Once the SOAR hub is running (`uvicorn main:app --host 0.0.0.0 --port 8000` inside `soar-hub/`), use these two curl commands to verify the full 6-node LangGraph pipeline end-to-end without needing a real Wazuh or Elastic event.
+
+### Test 1 — Inject a realistic Elastic Security alert payload
+
+This simulates the exact JSON structure that `elastic_puller.py` forwards to `/alerts` when it pulls a brute-force signal from Elasticsearch. The FastAPI hub normalises it, classifies it as `BRUTE_FORCE`, runs it through all 6 nodes, and executes (or dry-runs) the `fail2ban-client` containment command.
+
+```bash
+curl -X POST http://127.0.0.1:8000/alerts \
+  -H "Content-Type: application/json" \
+  -d '{
+    "kibana.alert.rule.name": "Brute Force",
+    "message": "Multiple failed SSH login attempts detected on production-web-01 from source IP 185.220.101.5",
+    "@timestamp": "2026-05-20T00:00:00Z",
+    "source": {
+      "ip": "185.220.101.5"
+    }
+  }'
+```
+
+**Expected response:**
+```json
+{"status": "accepted", "description": "Multiple failed SSH login attempts detected...", "level": 7}
+```
+
+The hub returns `202 Accepted` immediately. Watch the server terminal for the 6-node pipeline executing in the background:
+
+```
+[SOAR Node 1] TriageIngestion — classifying alert...
+           Category=BRUTE_FORCE  Priority=HIGH  IP=185.220.101.5
+[SOAR Node 2] ThreatIntel — querying reputation sources...
+[SOAR Node 3] RemediationArchitect — selecting remediation strategy...
+[SOAR Node 4] MitreMapping — correlating to ATT&CK framework...
+           T1110.001 — Password Guessing
+[SOAR Node 5] AutonomousContainment — executing response...
+           Status=DRY_RUN  command=fail2ban-client set sshd banip 185.220.101.5
+[SOAR Node 6] MarkdownSummary — generating executive brief...
+```
+
+### Test 2 — Built-in smoke test endpoint
+
+```bash
+curl -X POST http://127.0.0.1:8000/test
+```
+
+Fires a pre-built synthetic `BRUTE_FORCE` alert (source IP `45.142.212.100`, a known C2 node in the internal blacklist) through the entire pipeline without needing any JSON body.
+
+---
+
+### Screenshot — First Successful End-to-End Alert
+
+The screenshot below captures the first live test: an Elastic-format brute-force alert injected via `POST /alerts`, detected by the SOAR hub, and forwarded to the LangGraph orchestration engine. The `200 OK` on the `/alerts` line confirms the hub accepted the payload and launched the background pipeline.
+
+![SOAR Hub — First live alert detected](assets/soar-hub-alert-test.png)
+
+> **Note:** To set `DRY_RUN=false` and execute containment commands for real, update your `.env` file on the Ubuntu VM. Default is `true` so no system commands run without explicit opt-in.
+
+---
+
 ## Lessons Learned & Architectural Pivot: From Webhooks to API-Driven Polling
 
 > *How a resource-constrained lab environment forced a better engineering decision — and why the result mirrors how enterprise SOAR platforms actually work in production.*

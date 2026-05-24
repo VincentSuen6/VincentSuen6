@@ -197,62 +197,103 @@ def triage_ingestion_node(state: SOCAgentState) -> Dict:
 # ── Node 2: Threat Intel Agent ────────────────────────────────────────────────
 
 def threat_intel_node(state: SOCAgentState) -> Dict:
-    """Query AbuseIPDB and internal blacklist for the source IP."""
-    print("[SOAR Node 2] ThreatIntel — querying reputation sources...")
+    """
+    6-source threat enrichment: internal blacklist → enrichment_engine
+    (AbuseIPDB, VirusTotal, OTX, Shodan, MISP, TAXII).
+    All external sources degrade gracefully when API keys are absent.
+    """
+    print("[SOAR Node 2] ThreatIntel — querying 6-source enrichment engine...")
 
-    src_ip      = state["src_ip"]
+    src_ip  = state["src_ip"]
+    alert   = state["raw_alert"]
+
     intel_packet: dict = {
-        "abuse_score":      "0%",
+        "abuse_score":       "0%",
         "internal_blacklist": False,
         "abuseipdb_checked": False,
-        "country":          "",
-        "isp":              "",
-        "total_reports":    0,
+        "country":           "",
+        "isp":               "",
+        "total_reports":     0,
+        "risk_score":        0,
+        "enrichment":        {},
     }
     is_malicious = False
 
-    if not src_ip:
-        print("           No source IP — skipping reputation check")
-        return {
-            "enrichment_metadata":  intel_packet,
-            "ip_is_malicious":      False,
-            "abuse_score":          "0%",
-            "in_internal_blacklist": False,
-        }
-
     # Check internal blacklist first (instant, no API call)
-    if src_ip in INTERNAL_BLACKLIST:
+    if src_ip and src_ip in INTERNAL_BLACKLIST:
         intel_packet["internal_blacklist"] = True
         intel_packet["abuse_score"]        = "100%"
+        intel_packet["risk_score"]         = 100
         is_malicious                       = True
         print(f"           {src_ip} — INTERNAL BLACKLIST HIT")
 
-    # Check AbuseIPDB if key available
-    if ABUSEIPDB_KEY and not is_malicious:
-        try:
-            r = requests.get(
-                "https://api.abuseipdb.com/api/v2/check",
-                headers={"Key": ABUSEIPDB_KEY, "Accept": "application/json"},
-                params={"ipAddress": src_ip, "maxAgeInDays": 90},
-                timeout=8,
-            )
-            if r.status_code == 200:
-                d = r.json().get("data", {})
-                score = d.get("abuseConfidenceScore", 0)
-                intel_packet.update({
-                    "abuse_score":       f"{score}%",
-                    "total_reports":     d.get("totalReports", 0),
-                    "country":           d.get("countryCode", ""),
-                    "isp":               d.get("isp", ""),
-                    "abuseipdb_checked": True,
-                })
-                if score >= 50:
-                    is_malicious = True
-                print(f"           {src_ip} AbuseIPDB score={score}%  ISP={d.get('isp','')}")
-        except Exception as e:
-            print(f"           AbuseIPDB error: {e}")
-    elif not ABUSEIPDB_KEY:
-        print("           ABUSEIPDB_KEY not set — skipping API check")
+    if not src_ip and not alert.get("hashes") and not alert.get("cve_id"):
+        print("           No enrichable indicator — skipping all sources")
+        return {
+            "enrichment_metadata":   intel_packet,
+            "ip_is_malicious":       False,
+            "abuse_score":           "0%",
+            "in_internal_blacklist": False,
+        }
+
+    # Build a minimal threat dict that enrichment_engine understands
+    threat_for_enrichment = {
+        "src_ips":   [src_ip] if src_ip else [],
+        "hashes":    alert.get("hashes", []),
+        "cve_id":    alert.get("cve_id"),
+        "type":      state.get("threat_category", "UNKNOWN"),
+        "source":    alert.get("source", "elastic-soar"),
+    }
+
+    try:
+        from intelligence.enrichment_engine import enrich_threat
+        enriched   = enrich_threat(threat_for_enrichment)
+        enrichment = enriched.get("enrichment", {})
+        risk_score = enriched.get("risk_score", 0)
+
+        abuse_data = enrichment.get("abuseipdb", {})
+        score      = abuse_data.get("abuse_confidence_score", 0)
+
+        intel_packet.update({
+            "abuse_score":       f"{score}%",
+            "total_reports":     abuse_data.get("total_reports", 0),
+            "country":           abuse_data.get("country_code", ""),
+            "isp":               abuse_data.get("isp", ""),
+            "abuseipdb_checked": bool(abuse_data),
+            "risk_score":        risk_score,
+            "enrichment":        enrichment,
+        })
+
+        if not is_malicious and (score >= 50 or risk_score >= 60):
+            is_malicious = True
+
+        sources_used = enrichment.get("sources_used", [])
+        print(f"           {src_ip or 'no-ip'}  abuse={score}%  risk={risk_score}/100  sources={sources_used}")
+
+    except Exception as e:
+        print(f"           Enrichment engine error ({e}) — falling back to AbuseIPDB only")
+        if ABUSEIPDB_KEY and src_ip and not is_malicious:
+            try:
+                r = requests.get(
+                    "https://api.abuseipdb.com/api/v2/check",
+                    headers={"Key": ABUSEIPDB_KEY, "Accept": "application/json"},
+                    params={"ipAddress": src_ip, "maxAgeInDays": 90},
+                    timeout=8,
+                )
+                if r.status_code == 200:
+                    d = r.json().get("data", {})
+                    score = d.get("abuseConfidenceScore", 0)
+                    intel_packet.update({
+                        "abuse_score":       f"{score}%",
+                        "total_reports":     d.get("totalReports", 0),
+                        "country":           d.get("countryCode", ""),
+                        "isp":               d.get("isp", ""),
+                        "abuseipdb_checked": True,
+                    })
+                    if score >= 50:
+                        is_malicious = True
+            except Exception as e2:
+                print(f"           AbuseIPDB fallback also failed: {e2}")
 
     return {
         "enrichment_metadata":   intel_packet,
@@ -260,6 +301,7 @@ def threat_intel_node(state: SOCAgentState) -> Dict:
         "abuse_score":           intel_packet["abuse_score"],
         "in_internal_blacklist": intel_packet["internal_blacklist"],
     }
+
 
 
 # ── Node 3: Remediation Architect Agent ───────────────────────────────────────
@@ -755,6 +797,7 @@ def _write_audit(state: SOCAgentState, exec_result: dict) -> None:
 # ── Public entry point ─────────────────────────────────────────────────────────
 
 _graph = build_soar_graph()
+compiled_soc_graph = _graph   # public alias used by soar-hub/main.py
 
 
 def run_soar_graph(alert: dict) -> SOCAgentState:
@@ -773,6 +816,29 @@ def run_soar_graph(alert: dict) -> SOCAgentState:
     _write_audit(state, state.get("execution_result", {}))
     state = dict(state)
     state["audit_logged"] = True
+
+    # Forward enriched decision to Splunk HEC so dashboards reflect SOAR output
+    try:
+        from intelligence.splunk_hec import send_to_splunk
+        splunk_record = {
+            "type":             state["threat_category"],
+            "rule_id":          state["rule_id"],
+            "rule_level":       int(alert.get("rule", {}).get("level", alert.get("rule_level", 0))),
+            "description":      state["description"],
+            "agent_name":       alert.get("agent", {}).get("name", "unknown"),
+            "src_ips":          [state["src_ip"]] if state["src_ip"] else [],
+            "mitre_technique":  state["mitre_technique"],
+            "mitre_tactic":     state["mitre_tactic"],
+            "risk_score":       state["enrichment_metadata"].get("risk_score", 0),
+            "enrichment":       state["enrichment_metadata"].get("enrichment", {}),
+            "containment":      state["containment_status"],
+            "incident_id":      state["incident_id"],
+            "timestamp":        alert.get("@timestamp", alert.get("timestamp", "")),
+            "source":           "soar-graph",
+        }
+        send_to_splunk(splunk_record)
+    except Exception as e:
+        print(f"[SOAR] Splunk HEC forward failed (non-fatal): {e}")
 
     print(f"\n  INCIDENT  : {state['incident_id']}")
     print(f"  CATEGORY  : {state['threat_category']}")

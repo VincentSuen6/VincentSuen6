@@ -1,0 +1,154 @@
+version: "3.8"
+
+# Named volumes persist data across container restarts.
+# Without them, Qdrant vectors and Postgres checkpoints are lost on `docker compose down`.
+volumes:
+  qdrant_data:
+  postgres_data:
+  jaeger_data:
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Message Broker
+  # ---------------------------------------------------------------------------
+  broker:
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"    # Management UI — http://localhost:15672 (guest/guest)
+    restart: always
+
+  # ---------------------------------------------------------------------------
+  # State & Metrics Cache
+  # ---------------------------------------------------------------------------
+  cache:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+    restart: always
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL — LangGraph checkpoint store
+  # Holds serialised graph state for every paused workflow so any worker
+  # container can resume a HITL-interrupted job after the human approves.
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    restart: always
+    environment:
+      POSTGRES_USER:     soar
+      POSTGRES_PASSWORD: soar
+      POSTGRES_DB:       soar
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # ---------------------------------------------------------------------------
+  # Qdrant — persistent vector store for semantic deduplication
+  # Replaces the in-process Python list so multiple worker replicas share
+  # one consistent incident vector index.
+  # ---------------------------------------------------------------------------
+  qdrant:
+    image: qdrant/qdrant
+    ports:
+      - "6333:6333"     # gRPC / REST API
+      - "6334:6334"     # Web UI — http://localhost:6334/dashboard
+    restart: always
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  # ---------------------------------------------------------------------------
+  # Distributed Tracing — Jaeger all-in-one
+  # UI:         http://localhost:16686
+  # OTLP gRPC:  http://jaeger:4317  (used by workers and api-server)
+  # ---------------------------------------------------------------------------
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    ports:
+      - "16686:16686"   # Jaeger web UI — search & waterfall traces
+      - "4317:4317"     # OTLP gRPC receiver
+    restart: always
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+
+  # ---------------------------------------------------------------------------
+  # Ingestion API
+  # ---------------------------------------------------------------------------
+  api-server:
+    build: .
+    command: uvicorn app:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    restart: always
+    depends_on:
+      - broker
+      - cache
+      - postgres
+      - qdrant
+      - jaeger
+    environment:
+      - CELERY_BROKER_URL=amqp://broker:5672//
+      - REDIS_URL=redis://cache:6379/0
+      - POSTGRES_CONN=postgresql://soar:soar@postgres:5432/soar
+      - CORS_ORIGINS=http://localhost:3000
+      - DEDUP_WINDOW_SECONDS=600
+      - BRUTE_FORCE_MIN_ATTEMPTS=3
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
+
+  # ---------------------------------------------------------------------------
+  # LangGraph Celery Worker
+  # cap_add: NET_ADMIN grants iptables access without full privileged mode.
+  # ---------------------------------------------------------------------------
+  worker:
+    build: .
+    command: celery -A tasks worker --loglevel=info --concurrency=4
+    restart: always
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      - broker
+      - cache
+      - postgres
+      - qdrant
+      - jaeger
+    environment:
+      - CELERY_BROKER_URL=amqp://broker:5672//
+      - REDIS_URL=redis://cache:6379/0
+      - POSTGRES_CONN=postgresql://soar:soar@postgres:5432/soar
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - THREAT_SCORE_THRESHOLD=7.5
+      - BLOCKED_IP_TTL_SECONDS=86400
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
+      - VT_API_KEY=${VT_API_KEY:-}
+      - ABUSEIPDB_KEY=${ABUSEIPDB_KEY:-}
+      - OTX_API_KEY=${OTX_API_KEY:-}
+      - SHODAN_API_KEY=${SHODAN_API_KEY:-}
+      - MISP_URL=${MISP_URL:-}
+      - MISP_KEY=${MISP_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - SPLUNK_HEC_URL=${SPLUNK_HEC_URL:-}
+      - SPLUNK_HEC_TOKEN=${SPLUNK_HEC_TOKEN:-}
+
+  # ---------------------------------------------------------------------------
+  # Semantic Deduplication Worker (pika consumer)
+  # ---------------------------------------------------------------------------
+  semantic-worker:
+    build: .
+    command: python workers.py
+    restart: always
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      - broker
+      - cache
+      - qdrant
+    environment:
+      - RABBITMQ_HOST=broker
+      - REDIS_HOST=cache
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - SIMILARITY_THRESHOLD=0.90
+      - LOOKBACK_WINDOW_SECONDS=600
