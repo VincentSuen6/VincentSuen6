@@ -11,6 +11,7 @@ Replaces the previous in-process list with Qdrant so that:
   3. Lookback window is enforced via timestamp payload filtering, not manual eviction.
 """
 
+import ipaddress
 import json
 import os
 import time
@@ -32,15 +33,34 @@ from qdrant_client.models import (
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-_QDRANT_HOST       = os.getenv("QDRANT_HOST",              "localhost")
-_QDRANT_PORT       = int(os.getenv("QDRANT_PORT",          "6333"))
-_RABBITMQ_HOST     = os.getenv("RABBITMQ_HOST",            "localhost")
-_REDIS_HOST        = os.getenv("REDIS_HOST",               "localhost")
-_COLLECTION        = "incident_vectors"
-_VECTOR_DIM        = 384       # all-MiniLM-L6-v2 output dimension
-_SIMILARITY_THRESH = float(os.getenv("SIMILARITY_THRESHOLD",     "0.90"))
-_LOOKBACK_SECONDS  = int(os.getenv("LOOKBACK_WINDOW_SECONDS",    "600"))
+_QDRANT_HOST        = os.getenv("QDRANT_HOST",               "localhost")
+_QDRANT_PORT        = int(os.getenv("QDRANT_PORT",           "6333"))
+_RABBITMQ_HOST      = os.getenv("RABBITMQ_HOST",             "localhost")
+_REDIS_HOST         = os.getenv("REDIS_HOST",                "localhost")
+_COLLECTION         = "incident_vectors"
+_VECTOR_DIM         = 384       # all-MiniLM-L6-v2 output dimension
+_SIMILARITY_THRESH  = float(os.getenv("SIMILARITY_THRESHOLD",     "0.90"))
+_LOOKBACK_SECONDS   = int(os.getenv("LOOKBACK_WINDOW_SECONDS",    "600"))
 _BRUTE_FORCE_SIGNAL = "failed password"
+
+# DRY_RUN=true (default) disables the fast-path iptables block.
+# Set DRY_RUN=false only in production after testing — the fast-path fires
+# BEFORE the HITL gate, so it blocks without human approval.
+_DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
+
+_PRIVATE_NETS = [
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+]
+
+
+def _is_rfc1918(ip: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(ip)
+        return any(addr in net for net in _PRIVATE_NETS)
+    except ValueError:
+        return True   # treat unparseable IPs as private — fail safe
 
 # ---------------------------------------------------------------------------
 # Infrastructure clients
@@ -124,15 +144,41 @@ def evaluate_semantic_incident(alert: dict) -> tuple[bool, str]:
 # ---------------------------------------------------------------------------
 # Active response — fast-path for obvious brute-force signals
 # (bypasses LangGraph for instant block before VT lookup completes)
+#
+# SECURITY CONSTRAINTS (must all pass before any subprocess call):
+#   1. DRY_RUN must be false — opt-in, not opt-out
+#   2. IP must parse as a valid address
+#   3. IP must not be RFC 1918 — never block internal addresses
 # ---------------------------------------------------------------------------
 def execute_active_response(attacker_ip: str) -> None:
     import subprocess
-    cmd = ["sudo", "iptables", "-A", "INPUT", "-s", attacker_ip, "-j", "DROP"]
+
+    if _DRY_RUN:
+        print(f"[DRY_RUN] Would fast-path block {attacker_ip} — set DRY_RUN=false to enable.")
+        return
+
+    try:
+        addr = ipaddress.ip_address(attacker_ip)
+    except ValueError:
+        r_client.incr("metric:error_logs")
+        print(f"[FastPath] Rejected: {attacker_ip!r} is not a valid IP address.")
+        return
+
+    if _is_rfc1918(attacker_ip):
+        r_client.incr("metric:error_logs")
+        print(f"[FastPath] Rejected: {attacker_ip} is an RFC 1918 address. Never fast-path block internal IPs.")
+        return
+
+    # IP is a discrete kernel argument in array form — not shell-interpolated.
+    cmd = ["sudo", "iptables", "-A", "INPUT", "-s", str(addr), "-j", "DROP"]
     try:
         subprocess.run(cmd, check=True, capture_output=True)
         r_client.incr("metric:contained_hosts")
-    except subprocess.CalledProcessError:
-        r_client.incr("metric:system_errors")
+        print(f"[FastPath] iptables DROP applied to {attacker_ip}.")
+    except subprocess.CalledProcessError as exc:
+        r_client.incr("metric:error_logs")
+        stderr = exc.stderr.decode(errors="replace") if exc.stderr else "unknown"
+        print(f"[FastPath] iptables failed for {attacker_ip}: {stderr}")
 
 
 # ---------------------------------------------------------------------------

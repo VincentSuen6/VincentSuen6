@@ -252,9 +252,9 @@ async def event_stream():
                 "error_count":       int(r_client.get("metric:error_logs")           or 0),
                 "total_contained":   int(r_client.get("metric:TOTAL_ALERTS_BLOCKED") or 0),
                 "pending_count":     int(r_client.get("metric:pending_count")        or 0),
+                "detection_threshold": float(r_client.get("dynamic:vt_threshold")   or 7.5),
                 "pipeline_status":   "OPERATIONAL",
                 "pending_approvals": pending_raw,
-                "recent_audit":      r_client.lrange("audit:trail", 0, 4),
             })
             yield f"data: {payload}\n\n"
             await asyncio.sleep(_SSE_INTERVAL)

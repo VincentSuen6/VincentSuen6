@@ -19,13 +19,14 @@ const LOG_COLORS = {
 // ---------------------------------------------------------------------------
 export default function SOARDashboard() {
   const [metrics, setMetrics] = useState({
-    info_count:        0,
-    warning_count:     0,
-    error_count:       0,
-    total_contained:   0,
-    pending_count:     0,
-    pipeline_status:   'CONNECTING',
-    pending_approvals: {},
+    info_count:          0,
+    warning_count:       0,
+    error_count:         0,
+    total_contained:     0,
+    pending_count:       0,
+    detection_threshold: 7.5,
+    pipeline_status:     'CONNECTING',
+    pending_approvals:   {},
   });
   const [connected, setConnected] = useState(false);
   const [logs, setLogs] = useState([
@@ -60,17 +61,6 @@ export default function SOARDashboard() {
       const data = JSON.parse(e.data);
       setMetrics(data);
 
-      // Surface latest LangGraph audit step from the Redis circular buffer
-      if (data.recent_audit?.length) {
-        try {
-          const entry    = JSON.parse(data.recent_audit[0]);
-          const steps    = entry?.event?.audit ?? [];
-          const lastStep = steps[steps.length - 1];
-          if (lastStep) appendLog('AUDIT', lastStep);
-        } catch { /* malformed entry — skip */ }
-      }
-
-      // Notify when a new HITL approval arrives in the queue
       if (data.pending_count > 0) {
         appendLog('HITL', `${data.pending_count} action(s) awaiting human approval.`);
       }
@@ -162,7 +152,7 @@ export default function SOARDashboard() {
       </div>
 
       {/* Metric cards */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-8">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-8">
         <MetricCard title="Filtered / Deduped"  count={metrics.info_count}      color="text-zinc-400" />
         <MetricCard title="Triaged Alerts"       count={metrics.warning_count}   color="text-amber-400"   icon={<AlertTriangle size={18} />} />
         <MetricCard title="System Errors"        count={metrics.error_count}     color="text-rose-500" />
@@ -172,6 +162,12 @@ export default function SOARDashboard() {
           count={metrics.pending_count}
           color={metrics.pending_count > 0 ? 'text-purple-400 animate-pulse' : 'text-zinc-400'}
           icon={<Clock size={18} />}
+        />
+        <MetricCard
+          title="Detect Threshold"
+          count={metrics.detection_threshold?.toFixed(1) ?? '7.5'}
+          color="text-sky-400"
+          raw
         />
       </div>
 
@@ -242,14 +238,14 @@ export default function SOARDashboard() {
 // ---------------------------------------------------------------------------
 // MetricCard
 // ---------------------------------------------------------------------------
-function MetricCard({ title, count, color, icon }) {
+function MetricCard({ title, count, color, icon, raw }) {
   return (
     <div className="bg-zinc-900 border border-zinc-800 p-5 rounded flex justify-between items-center">
       <div>
         <p className="text-xs font-medium uppercase tracking-wider text-zinc-400">{title}</p>
         {/* tabular-nums prevents layout shift as counter digits change width */}
         <p className={`text-3xl font-bold mt-1 tabular-nums ${color}`}>
-          {count.toLocaleString()}
+          {raw ? count : (typeof count === 'number' ? count.toLocaleString() : count)}
         </p>
       </div>
       {icon && <div className={color}>{icon}</div>}
