@@ -35,9 +35,14 @@ _TEMPLATE = """<!DOCTYPE html>
   .evidence { font-size: .8rem; color: #f85149; margin-top: .25rem; }
   .summary  { display: flex; gap: 1.5rem; margin: 1.5rem 0; }
   .badge    { padding: .4rem 1rem; border-radius: 4px; font-size: .85rem; font-weight: 600; }
-  .badge-gap   { background: #3d1a1a; color: #f85149; }
-  .badge-ok    { background: #0d2d0d; color: #3fb950; }
-  .badge-total { background: #1c2128; color: #8b949e; }
+  .badge-gap        { background: #3d1a1a; color: #f85149; }
+  .badge-ok         { background: #0d2d0d; color: #3fb950; }
+  .badge-total      { background: #1c2128; color: #8b949e; }
+  .badge-risk       { background: #1c2128; color: #c9d1d9; }
+  .badge-risk.high  { background: #3d1a1a; color: #f85149; }
+  .badge-risk.med   { background: #2d2000; color: #d29922; }
+  .badge-risk.low   { background: #0d2d0d; color: #3fb950; }
+  .badge-trend      { background: #1c2128; color: #8b949e; }
 </style>
 </head>
 <body>
@@ -53,6 +58,8 @@ _TEMPLATE = """<!DOCTYPE html>
   <span class="badge badge-total">Total: {{ findings|length }}</span>
   <span class="badge badge-gap">Gaps: {{ findings|selectattr('is_gap')|list|length }}</span>
   <span class="badge badge-ok">Covered: {{ findings|rejectattr('is_gap')|list|length }}</span>
+  <span class="badge badge-risk {{ risk_class }}">Residual Risk: {{ risk_score }} / 10</span>
+  {% if trend_str %}<span class="badge badge-trend">{{ trend_str }}</span>{% endif %}
 </div>
 
 <table>
@@ -102,15 +109,27 @@ def write_report(
     output_dir: str,
     assessment_id: str,
     target: str,
+    risk_score: float = 0.0,
+    trend_str: str = "",
 ) -> Path:
     env = Environment(loader=BaseLoader())
     template = env.from_string(_TEMPLATE)
+
+    if risk_score >= 7.0:
+        risk_class = "high"
+    elif risk_score >= 4.0:
+        risk_class = "med"
+    else:
+        risk_class = "low"
 
     html = template.render(
         findings=findings,
         assessment_id=assessment_id,
         target=target,
         generated=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        risk_score=risk_score,
+        risk_class=risk_class,
+        trend_str=trend_str,
     )
 
     out_dir = Path(output_dir)

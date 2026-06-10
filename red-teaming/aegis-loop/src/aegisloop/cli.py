@@ -30,6 +30,7 @@ def _config_from_env() -> AssessmentConfig:
         target_url=os.environ.get("AEGIS_TARGET_URL", "http://localhost:8080"),
         request_timeout=int(os.environ.get("AEGIS_REQUEST_TIMEOUT", 10)),
         rate_limit_delay=float(os.environ.get("AEGIS_RATE_LIMIT_DELAY", 0.5)),
+        max_workers=int(os.environ.get("AEGIS_MAX_WORKERS", 5)),
         assessor=os.environ.get("AEGIS_ASSESSOR", "Purple Team"),
         report_dir=os.environ.get("AEGIS_REPORT_DIR", "./reports"),
         navigator_dir=os.environ.get("AEGIS_NAVIGATOR_DIR", "./navigator-data"),
@@ -54,8 +55,20 @@ def run(
         console.print("\n[cyan]Correlating WAF telemetry...[/cyan]")
         findings = correlate(findings, config.waf_log_path)
 
+    risk_score = runner._compute_risk_score(findings)
+    prev_gaps = runner._load_previous_gap_count()
+    gap_count = sum(1 for f in findings if f.is_gap)
+    if prev_gaps is not None:
+        delta = gap_count - prev_gaps
+        trend_str = f"{'↑' if delta > 0 else '↓' if delta < 0 else '='} {delta:+d} vs last run"
+    else:
+        trend_str = ""
+
     navigator_path = write_layer(findings, config.navigator_dir, config.assessment_id)
-    report_path = write_report(findings, config.report_dir, config.assessment_id, config.target_url)
+    report_path = write_report(
+        findings, config.report_dir, config.assessment_id, config.target_url,
+        risk_score=risk_score, trend_str=trend_str,
+    )
 
     console.print(f"\n  Navigator layer : [bold]{navigator_path}[/bold]")
     console.print(f"  HTML report     : [bold]{report_path}[/bold]")

@@ -18,10 +18,17 @@ _NGINX_STATUS_RE = re.compile(r'"\s*(?:GET|POST|PUT|DELETE|HEAD|OPTIONS)[^"]*"\s
 
 # Attack signature → technique ID
 _FINGERPRINTS: dict[str, str] = {
+    # Existing modules
     r"(?:UNION\s+(?:ALL\s+)?SELECT|OR\s+1\s*=\s*1|--\s*$)": "T1190",
     r"<script\b[^>]*>": "T1059.007",
     r"(?:\.\./){2,}": "T1083",
     r"/api/Users/\d+": "T1078",
+    # New modules (v2)
+    r"(?:;\s*(?:cat|ls|id|whoami|uname)|[`$]\((?:id|whoami)\)|\|\s*(?:id|cat))": "T1059.004",
+    r"(?:169\.254\.169\.254|file:///etc|http://(?:127\.0\.0\.1|localhost):\d+)": "T1090.001",
+    r"<!DOCTYPE\s+\w+\s*\[.*?<!ENTITY": "T1005",
+    r"/redirect\?to=https?://(?!juice-sh\.op)": "T1598.003",
+    r"(?:\"email\":\s*\"[^\"]+\",\s*\"password\":).*(?:\"email\":\s*\"[^\"]+\",\s*\"password\":)": "T1110.004",
 }
 
 

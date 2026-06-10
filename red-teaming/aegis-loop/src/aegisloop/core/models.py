@@ -57,6 +57,7 @@ class AssessmentConfig(BaseModel):
     target_url: str
     request_timeout: int = 10
     rate_limit_delay: float = 0.5
+    max_workers: int = 5
     assessor: str = "Purple Team"
     assessment_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     report_dir: str = "./reports"
