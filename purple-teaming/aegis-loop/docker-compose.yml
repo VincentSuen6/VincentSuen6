@@ -1,0 +1,91 @@
+version: '3.8'
+
+networks:
+  aegisloop_internal:
+    driver: bridge
+    internal: true        # juice-shop is not reachable from host — must go through WAF
+  aegisloop_external:
+    driver: bridge
+
+services:
+  juice-shop:
+    image: bkimminich/juice-shop:latest
+    container_name: juice_shop_target
+    restart: unless-stopped
+    networks:
+      - aegisloop_internal
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/rest/admin/application-version"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  modsecurity-waf:
+    image: coreruleset/modsecurity-crs:nginx
+    container_name: modsecurity_waf
+    restart: unless-stopped
+    networks:
+      - aegisloop_internal
+      - aegisloop_external
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - BACKEND=http://juice-shop:3000
+      - MODSEC_RULE_ENGINE=On
+      - BLOCKING_PARANOIA=2          # Paranoia level 2: catches more evasion variants
+      - DETECTION_PARANOIA=3         # Detect at level 3 while only blocking at level 2
+      - ANOMALY_INBOUND=5            # Score threshold to trigger a block
+      - ANOMALY_OUTBOUND=4
+      - ALLOWED_METHODS=GET POST PUT DELETE OPTIONS HEAD
+      - MAX_FILE_SIZE=1048576
+      - MODSEC_AUDIT_LOG=/var/log/nginx/modsec_audit.log
+      - MODSEC_AUDIT_LOG_FORMAT=JSON # Structured audit logs for reliable parsing
+    volumes:
+      - ./waf-logs:/var/log/nginx
+    depends_on:
+      juice-shop:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8080/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  attack-navigator:
+    image: ghcr.io/mitre-attack/attack-navigator:latest
+    container_name: attack_navigator
+    restart: unless-stopped
+    networks:
+      - aegisloop_external
+    ports:
+      - "8082:80"
+    volumes:
+      - ./navigator-data:/usr/share/nginx/html/assets/aegisloop
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:80/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
