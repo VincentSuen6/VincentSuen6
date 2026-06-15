@@ -28,6 +28,7 @@ I am a third-year Computing Science student at Simon Fraser University and the E
 - 🔹 **Active Defense:** Implementing tactical deception and monitoring via home-lab environments.
 - 🔹 **SOC Operations:** Configured Splunk for security monitoring and detection rule validation across attack simulations.
 - 🔹 **Endpoint Telemetry:** Deployed Velociraptor DFIR servers to facilitate real-time forensic collection and VQL-based remote triage.
+- 🔹 **Threat Hunting & Modelling:** Leveraged Elastic/Splunk to aggregate telemetry from endpoints, identifying behavioral deviations in user account activity.
 
 ---
 
@@ -35,7 +36,7 @@ I am a third-year Computing Science student at Simon Fraser University and the E
 
 ---
 
-### [Agentic SOAR — The Agentic SOC Automation Engine](https://github.com/VincentSuen6/agentic-SOC-operator)
+### [Agentic SOAR — The Agentic SOC Automation Engine](https://github.com/VincentSuen6/VincentSuen6/tree/main/agentic-SOC-operator)
 
 A three-tier, production-grade Security Orchestration, Automation and Response (SOAR) platform that takes a security alert from raw telemetry all the way to closed-loop autonomous containment with a cryptographically immutable audit trail.
 
@@ -91,7 +92,7 @@ The production-hardened upgrade to Tier 2, designed to handle real alert storms:
 
 ---
 
-#### Sub-Component: [SIEM Detection Library](https://github.com/VincentSuen6/agentic-SOC-operator/tree/main/SIEM-Detection)
+#### Sub-Component: [SIEM Detection Library](https://github.com/VincentSuen6/VincentSuen6/tree/main/agentic-SOC-operator/SIEM-Detection)
 
 A production-ready detection rule library covering six attack categories, deployed to both Wazuh and Splunk. Rules are authored by the `siem_generator` node in the Vulnerability Intelligence Agent pipeline — each rule is auto-generated after a CVE is decomposed, mapped to MITRE ATT&CK techniques, and back-ported into both SIEM platforms for closed-loop detection coverage.
 
@@ -110,7 +111,7 @@ Wazuh rules are XML-format, deployable to `/var/ossec/rules/`. Splunk SPL querie
 
 ---
 
-#### Sub-Component: [Sentinel SOAR — Vulnerability Intelligence Agent](https://github.com/VincentSuen6/agentic-SOC-operator/tree/main/SOAR-sentinel)
+#### Sub-Component: [Sentinel SOAR — Vulnerability Intelligence Agent](https://github.com/VincentSuen6/VincentSuen6/tree/main/agentic-SOC-operator/SOAR-sentinel)
 
 A CVE decomposition and OSINT automation engine that takes a CVE identifier as input and produces complete threat intelligence, MITRE ATT&CK mappings, and SIEM detection rules as output.
 
@@ -130,7 +131,7 @@ The **Active Response Agent** integrates directly: enriched alerts are passed to
 
 ---
 
-### [AegisLoop — Continuous Purple Team Control Validator](https://github.com/VincentSuen6/aegis-loop)
+### [AegisLoop — Continuous Purple Team Control Validator](https://github.com/VincentSuen6/VincentSuen6/tree/main/purple-teaming/aegis-loop)
 
 A purple-team automation platform that continuously answers one question: *"When an attacker runs a known exploit technique, does our WAF actually block it?"*
 
@@ -186,7 +187,7 @@ A GitHub Actions workflow runs weekly (Mondays 03:00 UTC) and on manual trigger 
 
 ---
 
-### [C2 Framework — Red Team Command and Control](https://github.com/VincentSuen6/red-teaming)
+### [C2 Framework — Red Team Command and Control](https://github.com/VincentSuen6/VincentSuen6/tree/main/red-teaming/C2)
 
 > ⚠️ **Authorized use only.** Built for controlled lab environments, authorized penetration testing engagements, and red team research. Never deploy against systems without explicit written permission.
 
