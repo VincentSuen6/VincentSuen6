@@ -16,6 +16,8 @@ import asyncio
 import ipaddress
 import json
 import os
+import uuid
+from datetime import datetime, timezone
 from typing import Optional
 
 from celery import Celery
@@ -27,6 +29,8 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 import redis
+
+from auth import APIKeyMiddleware
 
 # ---------------------------------------------------------------------------
 # Config
@@ -53,6 +57,7 @@ limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="SOC Operator — Autonomous SOAR Engine")
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(APIKeyMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_CORS_ORIGINS,
@@ -229,6 +234,14 @@ async def prometheus_metrics():
         "# HELP soar_detection_threshold Current adaptive threat score routing threshold",
         "# TYPE soar_detection_threshold gauge",
         f"soar_detection_threshold {threshold}",
+        "",
+        "# HELP soar_dlq_messages_total Alerts routed to the dead-letter queue due to processing failures",
+        "# TYPE soar_dlq_messages_total counter",
+        f"soar_dlq_messages_total {_int('metric:dlq_messages')}",
+        "",
+        "# HELP soar_vuln_intel_runs_total Vuln-intel pipeline runs triggered by CVE IDs in alerts",
+        "# TYPE soar_vuln_intel_runs_total counter",
+        f"soar_vuln_intel_runs_total {_int('metric:vuln_intel_runs')}",
     ]
     return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
 
@@ -260,3 +273,59 @@ async def event_stream():
             await asyncio.sleep(_SSE_INTERVAL)
 
     return StreamingResponse(_generate(), media_type="text/event-stream")
+
+
+# ---------------------------------------------------------------------------
+# STIX 2.1 IOC Export — share confirmed-malicious indicators with downstream tools
+# ---------------------------------------------------------------------------
+@app.get("/api/v1/iocs/stix")
+async def export_stix_bundle():
+    """
+    Export all confirmed-malicious IPs as a STIX 2.1 Bundle of Indicator objects.
+    Sources:
+      - Redis blocked:{ip} keys  — IPs blocked by the active containment node
+      - Internal blacklist        — hard-coded known-bad IPs from intel.py
+
+    Consumers: firewall allowlist generators, other SIEM instances, EDR platforms.
+    Format: STIX 2.1 JSON bundle (application/json).
+    """
+    from intel import INTERNAL_BLACKLIST
+
+    indicators = []
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Collect IPs that were actively blocked (keys set by active_containment_node)
+    blocked_keys = r_client.keys("blocked:*")
+    runtime_ips  = {k.removeprefix("blocked:") for k in blocked_keys}
+    all_ips      = runtime_ips | INTERNAL_BLACKLIST
+
+    for ip in sorted(all_ips):
+        try:
+            ipaddress.ip_address(ip)
+        except ValueError:
+            continue
+
+        source = "internal_blacklist" if ip in INTERNAL_BLACKLIST else "runtime_containment"
+        indicators.append({
+            "type":               "indicator",
+            "spec_version":       "2.1",
+            "id":                 f"indicator--{uuid.uuid5(uuid.NAMESPACE_X500, ip)}",
+            "created":            now,
+            "modified":           now,
+            "name":               f"Malicious IP: {ip}",
+            "description":        f"Confirmed malicious IP address. Source: {source}.",
+            "pattern":            f"[ipv4-addr:value = '{ip}']",
+            "pattern_type":       "stix",
+            "pattern_version":    "2.1",
+            "valid_from":         now,
+            "indicator_types":    ["malicious-activity"],
+            "confidence":         100 if source == "internal_blacklist" else 85,
+        })
+
+    bundle = {
+        "type":         "bundle",
+        "id":           f"bundle--{uuid.uuid4()}",
+        "spec_version": "2.1",
+        "objects":      indicators,
+    }
+    return bundle

@@ -24,9 +24,12 @@ What changed from the original version:
 import json
 import operator
 import os
+import re
 import subprocess
+import sys
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Annotated, List
 
 import httpx
@@ -38,6 +41,14 @@ from typing_extensions import TypedDict
 import audit
 import feedback
 import intel
+import thehive
+
+# Make the vuln-intel-agent importable from within the soar/ worker
+_VULN_AGENT_PATH = Path(__file__).parent.parent / "SOAR-sentinel" / "vuln-intel-agent"
+if str(_VULN_AGENT_PATH) not in sys.path:
+    sys.path.insert(0, str(_VULN_AGENT_PATH))
+
+_CVE_RE = re.compile(r"\bCVE-\d{4}-\d{4,7}\b", re.IGNORECASE)
 
 # ---------------------------------------------------------------------------
 # Config
@@ -181,6 +192,13 @@ def threat_intel_node(state: AgentState) -> dict:
         )
         print(note)
 
+        # Fire-and-forget vuln-intel pipeline for any CVEs mentioned in the log
+        raw_log  = state["alert_data"].get("raw_log", "")
+        cve_ids  = list({m.upper() for m in _CVE_RE.findall(raw_log)})
+        for cve_id in cve_ids:
+            celery_app.send_task("tasks.run_vuln_intel", args=[cve_id])
+            print(f"[{_ts()}][Intel] Dispatched vuln-intel pipeline for {cve_id}")
+
     return {
         "threat_intel_score": score,
         "enrichment":         result,
@@ -254,6 +272,10 @@ def active_containment_node(state: AgentState) -> dict:
 # Node 4: Splunk HEC + Merkle-Chained Audit (replaces Redis circular buffer)
 # ---------------------------------------------------------------------------
 def splunk_audit_node(state: AgentState) -> dict:
+    incident_id = state["alert_data"].get("alert_id", "unknown")
+    row_hash    = None
+    case_id     = None
+
     with _tracer.start_as_current_span("node.splunk_audit") as span:
         event = {
             "remediation":  state["remediation_action"],
@@ -277,11 +299,24 @@ def splunk_audit_node(state: AgentState) -> dict:
                 span.set_attribute("soar.splunk_error", str(e))
 
         # Merkle-chained immutable audit — replaces the mutable Redis LPUSH/LTRIM
-        incident_id = state["alert_data"].get("alert_id", "unknown")
-        row_hash    = audit.append(incident_id, event)
+        row_hash = audit.append(incident_id, event)
         span.set_attribute("soar.audit_hash", row_hash or "failed")
 
-    return {"audit_trail": [f"[{_ts()}][Audit] Immutable record committed. hash={row_hash}"]}
+        # TheHive case — persistent case lifecycle for SOC analysts
+        case_id = thehive.create_case(
+            incident_id=incident_id,
+            alert_data=state["alert_data"],
+            threat_score=state["threat_intel_score"],
+            mitre_techniques=state["mitre_techniques"],
+            remediation=state.get("remediation_action", "MONITOR"),
+        )
+        if case_id:
+            span.set_attribute("soar.thehive_case_id", case_id)
+
+    audit_note = f"[{_ts()}][Audit] Immutable record committed. hash={row_hash}"
+    if case_id:
+        audit_note += f" thehive_case={case_id}"
+    return {"audit_trail": [audit_note]}
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +405,69 @@ def process_security_graph(self, alert_dict: dict) -> None:
     except Exception as exc:
         r_client.incr("metric:error_logs")
         raise self.retry(exc=exc, countdown=60 * (2 ** self.request.retries))
+
+
+# ---------------------------------------------------------------------------
+# Celery task: vuln-intel pipeline — triggered automatically when a CVE ID
+# is found in the alert's raw_log by threat_intel_node
+# ---------------------------------------------------------------------------
+@celery_app.task(name="tasks.run_vuln_intel", bind=True, max_retries=2)
+def run_vuln_intel(self, cve_id: str) -> None:
+    """
+    Run the 7-node vuln-intel-agent pipeline for a specific CVE.
+    Results (Wazuh rule, Splunk SPL, MITRE mapping) are written to disk
+    by the siem_generator_node inside the pipeline.
+
+    This task is dispatched asynchronously from threat_intel_node when the
+    alert's raw_log contains a CVE identifier — e.g. "CVE-2024-1234 exploited".
+    It runs in a separate Celery worker process so it never blocks the main
+    SOAR pipeline; the SOAR workflow completes independently of this task.
+    """
+    try:
+        from graph import build_graph
+        vuln_graph = build_graph()
+        initial_state = {
+            "cve_id":           cve_id,
+            "cve_description":  "",
+            "cve_severity":     "",
+            "cve_cvss_score":   0.0,
+            "affected_products": [],
+            "cve_published_date": "",
+            "exploit_references": [],
+            "poc_available":    False,
+            "threat_actor_mentions": [],
+            "osint_summary":    "",
+            "stix_indicators":  [],
+            "related_campaigns": [],
+            "taxii_ttps":       [],
+            "cross_referenced_ttps": [],
+            "confidence_score": 0.0,
+            "validation_notes": "",
+            "mitre_techniques": [],
+            "mitre_tactics":    [],
+            "attack_chain":     [],
+            "wazuh_rule":       "",
+            "splunk_query":     "",
+            "alert_severity":   "",
+            "malware_families": [],
+            "behavior_timeline": [],
+            "ransomware_complexity_trend": "",
+            "exploit_timing_analysis": "",
+            "attacker_adaptation_notes": "",
+            "behavior_mitre_mapping": [],
+            "errors":           [],
+            "processing_status": "pending",
+        }
+        final_state = vuln_graph.invoke(initial_state)
+        r_client.incr("metric:vuln_intel_runs")
+        print(
+            f"[VulnIntel] {cve_id} complete — "
+            f"severity={final_state.get('cve_severity', 'N/A')} "
+            f"confidence={final_state.get('confidence_score', 0.0):.2f}"
+        )
+    except Exception as exc:
+        r_client.incr("metric:error_logs")
+        raise self.retry(exc=exc, countdown=120 * (2 ** self.request.retries))
 
 
 # ---------------------------------------------------------------------------

@@ -96,6 +96,7 @@ services:
       - DEDUP_WINDOW_SECONDS=600
       - BRUTE_FORCE_MIN_ATTEMPTS=3
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
+      - SOAR_API_KEYS=${SOAR_API_KEYS:-}
 
   # ---------------------------------------------------------------------------
   # LangGraph Celery Worker
@@ -131,6 +132,27 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - SPLUNK_HEC_URL=${SPLUNK_HEC_URL:-}
       - SPLUNK_HEC_TOKEN=${SPLUNK_HEC_TOKEN:-}
+      - THEHIVE_URL=${THEHIVE_URL:-}
+      - THEHIVE_API_KEY=${THEHIVE_API_KEY:-}
+      - THEHIVE_ORG=${THEHIVE_ORG:-SOC}
+
+  # ---------------------------------------------------------------------------
+  # Next.js HITL Dashboard
+  # ---------------------------------------------------------------------------
+  dashboard:
+    image: node:20-alpine
+    working_dir: /app
+    command: sh -c "npm install --silent && npm run dev"
+    ports:
+      - "3000:3000"
+    restart: always
+    depends_on:
+      - api-server
+    volumes:
+      - ../dashboard:/app
+    environment:
+      - NEXT_PUBLIC_SOAR_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_SOAR_API_KEY=${SOAR_API_KEYS:-}
 
   # ---------------------------------------------------------------------------
   # Semantic Deduplication Worker (pika consumer)

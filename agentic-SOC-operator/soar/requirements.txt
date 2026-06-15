@@ -37,3 +37,6 @@ opentelemetry-instrumentation-fastapi>=0.45b0
 
 # Anthropic SDK — Sigma rule auto-generation in feedback.py
 anthropic>=0.30.0
+
+# Testing
+pytest>=8.0.0

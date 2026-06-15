@@ -16,13 +16,24 @@ Composite scoring — weights sum to a max of 10.0:
   MISP attribute hits   : up to 1.0 pt   (hit_count * 0.25, capped)
   Internal blacklist    : hard override → 10.0 (no external calls made)
 
-Example: an IP with 0 VT detections but 47 OTX pulses + 3 Shodan CVEs
-scores 47*0.2 + 3*0.3 = 9.4+0.9 = 10.0 (clamped), correctly routed to the
-HITL containment branch. Single-source VT would score it 0 and silently drop.
+Resilience:
+  Circuit breaker (pybreaker) — after 3 consecutive failures a source's
+  circuit opens for 60 s. Calls during the open window raise immediately
+  instead of timing out, keeping p99 latency low under partial outages.
+
+  Per-source rate limiter (token bucket) — enforces API tier limits:
+    AbuseIPDB free: 1 000 req/day  → ~41/hour → floor to 1 req/90 s
+    VirusTotal public: 4 req/min   → 1 req/15 s
+    OTX: 10 000/day                → 1 req/9 s (very loose)
+    Shodan free: 1 req/s           → 1 req/1 s
+    MISP: internal, no published limit → 1 req/0.5 s
+  Limits are conservative; set *_RATE env vars to tune per-environment.
 """
 
 import ipaddress
 import os
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import httpx
@@ -63,13 +74,113 @@ def _is_rfc1918(ip: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Circuit breaker — simple state machine, no external dependency
+# ---------------------------------------------------------------------------
+class _CircuitBreaker:
+    """
+    Three-state (CLOSED → OPEN → HALF_OPEN) circuit breaker.
+
+    CLOSED  : normal operation; failures are counted.
+    OPEN    : source is failing; calls return {} immediately without I/O.
+    HALF_OPEN: one trial call allowed; if it succeeds → CLOSED, else → OPEN.
+
+    This prevents a timing-out source (e.g. AbuseIPDB rate-limited) from
+    holding a ThreadPoolExecutor thread for _TIMEOUT seconds on every check.
+    """
+
+    def __init__(self, name: str, fail_max: int = 3, reset_timeout: float = 60.0):
+        self.name          = name
+        self.fail_max      = fail_max
+        self.reset_timeout = reset_timeout
+        self._failures     = 0
+        self._state        = "CLOSED"   # CLOSED | OPEN | HALF_OPEN
+        self._opened_at    = 0.0
+        self._lock         = threading.Lock()
+
+    def call(self, fn, *args, **kwargs):
+        """Execute fn(*args) if the circuit allows it, else return {}."""
+        with self._lock:
+            if self._state == "OPEN":
+                if time.time() - self._opened_at >= self.reset_timeout:
+                    self._state = "HALF_OPEN"
+                else:
+                    return {}   # fast-fail
+
+        try:
+            result = fn(*args, **kwargs)
+            with self._lock:
+                self._failures = 0
+                self._state    = "CLOSED"
+            return result
+        except Exception:
+            with self._lock:
+                self._failures += 1
+                if self._failures >= self.fail_max or self._state == "HALF_OPEN":
+                    self._state    = "OPEN"
+                    self._opened_at = time.time()
+                    print(
+                        f"[CircuitBreaker] {self.name} OPEN — "
+                        f"will retry in {self.reset_timeout:.0f}s"
+                    )
+            return {}
+
+
+# ---------------------------------------------------------------------------
+# Per-source token-bucket rate limiter
+# ---------------------------------------------------------------------------
+class _RateLimiter:
+    """
+    Blocking token-bucket rate limiter.  Each source gets one token every
+    `min_interval` seconds.  If a call arrives before the interval has elapsed
+    the caller blocks (sleeps) for the remaining time.
+
+    This keeps us within free-tier API limits even under burst load.
+    """
+
+    def __init__(self, min_interval: float):
+        self._min_interval = min_interval
+        self._last_call    = 0.0
+        self._lock         = threading.Lock()
+
+    def acquire(self) -> None:
+        with self._lock:
+            now  = time.time()
+            wait = self._min_interval - (now - self._last_call)
+            if wait > 0:
+                time.sleep(wait)
+            self._last_call = time.time()
+
+
+# Rate limits: env-override, sensible defaults below
+_RATE_ABUSEIPDB = float(os.getenv("RATE_ABUSEIPDB_S",  "90"))   # 1 req / 90 s
+_RATE_VT        = float(os.getenv("RATE_VT_S",          "15"))   # 1 req / 15 s (4/min)
+_RATE_OTX       = float(os.getenv("RATE_OTX_S",         "9"))    # 1 req / 9 s
+_RATE_SHODAN    = float(os.getenv("RATE_SHODAN_S",       "1"))    # 1 req / 1 s
+_RATE_MISP      = float(os.getenv("RATE_MISP_S",         "0.5")) # 2 req / 1 s
+
+_cb_abuseipdb  = _CircuitBreaker("abuseipdb")
+_cb_virustotal = _CircuitBreaker("virustotal")
+_cb_otx        = _CircuitBreaker("otx")
+_cb_shodan     = _CircuitBreaker("shodan")
+_cb_misp       = _CircuitBreaker("misp")
+
+_rl_abuseipdb  = _RateLimiter(_RATE_ABUSEIPDB)
+_rl_virustotal = _RateLimiter(_RATE_VT)
+_rl_otx        = _RateLimiter(_RATE_OTX)
+_rl_shodan     = _RateLimiter(_RATE_SHODAN)
+_rl_misp       = _RateLimiter(_RATE_MISP)
+
+
+# ---------------------------------------------------------------------------
 # Individual source checkers — each returns {} on failure or missing key
 # ---------------------------------------------------------------------------
 
 def _check_abuseipdb(ip: str) -> dict:
     if not _ABUSEIPDB_KEY:
         return {}
-    try:
+    _rl_abuseipdb.acquire()
+
+    def _fetch(ip):
         with httpx.Client(timeout=_TIMEOUT) as c:
             r = c.get(
                 "https://api.abuseipdb.com/api/v2/check",
@@ -85,15 +196,17 @@ def _check_abuseipdb(ip: str) -> dict:
                     "isp":              d.get("isp", ""),
                     "country":          d.get("countryCode", ""),
                 }
-    except Exception:
-        pass
-    return {}
+        return {}
+
+    return _cb_abuseipdb.call(_fetch, ip)
 
 
 def _check_virustotal(ip: str) -> dict:
     if not _VT_KEY:
         return {}
-    try:
+    _rl_virustotal.acquire()
+
+    def _fetch(ip):
         with httpx.Client(timeout=_TIMEOUT) as c:
             r = c.get(
                 f"https://www.virustotal.com/api/v3/ip_addresses/{ip}",
@@ -111,15 +224,17 @@ def _check_virustotal(ip: str) -> dict:
                     "suspicious": stats.get("suspicious", 0),
                     "harmless":   stats.get("harmless", 0),
                 }
-    except Exception:
-        pass
-    return {}
+        return {}
+
+    return _cb_virustotal.call(_fetch, ip)
 
 
 def _check_otx(ip: str) -> dict:
     if not _OTX_KEY:
         return {}
-    try:
+    _rl_otx.acquire()
+
+    def _fetch(ip):
         with httpx.Client(timeout=_TIMEOUT) as c:
             r = c.get(
                 f"https://otx.alienvault.com/api/v1/indicators/IPv4/{ip}/general",
@@ -128,15 +243,17 @@ def _check_otx(ip: str) -> dict:
             if r.status_code == 200:
                 d = r.json()
                 return {"pulse_count": d.get("pulse_info", {}).get("count", 0)}
-    except Exception:
-        pass
-    return {}
+        return {}
+
+    return _cb_otx.call(_fetch, ip)
 
 
 def _check_shodan(ip: str) -> dict:
     if not _SHODAN_KEY:
         return {}
-    try:
+    _rl_shodan.acquire()
+
+    def _fetch(ip):
         with httpx.Client(timeout=_TIMEOUT) as c:
             r = c.get(
                 f"https://api.shodan.io/shodan/host/{ip}",
@@ -149,15 +266,17 @@ def _check_shodan(ip: str) -> dict:
                     "vulns":      list(d.get("vulns", {}).keys())[:10],
                     "org":        d.get("org", ""),
                 }
-    except Exception:
-        pass
-    return {}
+        return {}
+
+    return _cb_shodan.call(_fetch, ip)
 
 
 def _check_misp(ip: str) -> dict:
     if not _MISP_URL or not _MISP_KEY:
         return {}
-    try:
+    _rl_misp.acquire()
+
+    def _fetch(ip):
         with httpx.Client(timeout=_TIMEOUT, verify=False) as c:
             r = c.post(
                 f"{_MISP_URL.rstrip('/')}/attributes/restSearch",
@@ -171,9 +290,9 @@ def _check_misp(ip: str) -> dict:
             if r.status_code == 200:
                 attrs = r.json().get("response", {}).get("Attribute", [])
                 return {"hits": len(attrs)}
-    except Exception:
-        pass
-    return {}
+        return {}
+
+    return _cb_misp.call(_fetch, ip)
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +334,8 @@ def _composite_score(results: dict) -> float:
 def enrich_ip(ip: str) -> dict:
     """
     Fan out to all configured sources in parallel using ThreadPoolExecutor.
+    Each source is protected by a circuit breaker (fast-fails on open circuit)
+    and a rate limiter (token bucket, blocks until slot is available).
     Returns enrichment metadata dict with a composite 0-10 score field.
     """
     if ip in INTERNAL_BLACKLIST:
@@ -251,8 +372,8 @@ def enrich_ip(ip: str) -> dict:
             except Exception:
                 results[name] = {}
 
-    score        = _composite_score(results)
-    active       = [k for k, v in results.items() if v]
+    score  = _composite_score(results)
+    active = [k for k, v in results.items() if v]
 
     return {
         "score":          score,
