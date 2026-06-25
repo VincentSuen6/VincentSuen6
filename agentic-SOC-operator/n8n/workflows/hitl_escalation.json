@@ -1,0 +1,165 @@
+{
+  "name": "SOAR — HITL Severity-Tiered Escalation",
+  "nodes": [
+    {
+      "id": "poll-soar-events",
+      "name": "Poll SOAR Metrics (every 30s)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [200, 300],
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "seconds", "secondsInterval": 30 }]
+        }
+      }
+    },
+    {
+      "id": "fetch-pending",
+      "name": "GET /api/events Snapshot",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [420, 300],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SOAR_API_URL }}/api/v1/iocs/stix",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [{ "name": "X-API-Key", "value": "={{ $env.SOAR_API_KEY }}" }]
+        },
+        "options": { "timeout": 5000 }
+      }
+    },
+    {
+      "id": "fetch-metrics",
+      "name": "GET SOAR Metrics",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [420, 460],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SOAR_API_URL }}/metrics",
+        "options": { "timeout": 5000 }
+      }
+    },
+    {
+      "id": "parse-pending",
+      "name": "Parse Pending Approvals",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [640, 300],
+      "parameters": {
+        "jsCode": "// Poll the Redis-backed pending approvals via a lightweight HTTP call\nconst raw = await $http.get(`${$env.SOAR_API_URL}/api/v1/iocs/stix`, {\n  headers: { 'X-API-Key': $env.SOAR_API_KEY }\n});\n\n// Also fetch the SSE snapshot for pending_approvals\nconst eventsRes = await $http.get(`${$env.SOAR_API_URL}/health`);\n\n// Return each pending approval as a separate item for downstream routing\nconst pendingRaw = $input.item.json.pending_approvals || {};\nconst items = [];\nfor (const [threadId, payloadStr] of Object.entries(pendingRaw)) {\n  const payload = JSON.parse(payloadStr);\n  items.push({ json: { ...payload, thread_id: threadId } });\n}\nreturn items.length > 0 ? items : [{ json: { no_pending: true } }];"
+      }
+    },
+    {
+      "id": "check-has-pending",
+      "name": "Any Pending Approvals?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [860, 300],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.no_pending === true }}",
+              "value2": true,
+              "operation": "notEqual"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "route-by-severity",
+      "name": "Route by Threat Score",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [1080, 240],
+      "parameters": {
+        "dataType": "number",
+        "value1": "={{ $json.threat_score }}",
+        "rules": {
+          "rules": [
+            { "operation": "largerEqual", "value2": 9.0, "output": 0 },
+            { "operation": "largerEqual", "value2": 7.5, "output": 1 }
+          ]
+        },
+        "fallbackOutput": 2
+      }
+    },
+    {
+      "id": "pagerduty-critical",
+      "name": "PagerDuty P1 (Score >= 9.0)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1300, 100],
+      "parameters": {
+        "method": "POST",
+        "url": "https://events.pagerduty.com/v2/enqueue",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify({\n  routing_key: $env.PAGERDUTY_ROUTING_KEY,\n  event_action: 'trigger',\n  payload: {\n    summary: `[CRITICAL] SOAR: ${$json.alert_type} from ${$json.source_ip} — score ${$json.threat_score}/10`,\n    severity: 'critical',\n    source: $json.source_ip,\n    custom_details: {\n      thread_id:    $json.thread_id,\n      target_host:  $json.target_host,\n      threat_score: $json.threat_score,\n      mitre:        $json.mitre,\n      approve_url:  `${$env.SOAR_API_URL}/api/v1/approve/${$json.thread_id}`,\n      deny_url:     `${$env.SOAR_API_URL}/api/v1/deny/${$json.thread_id}`,\n      dashboard:    $env.DASHBOARD_URL || 'http://localhost:3000'\n    }\n  }\n}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "slack-high",
+      "name": "Slack Alert (Score 7.5-9.0)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1300, 280],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify({\n  text: `:warning: *SOAR HITL Alert — Human Approval Required*`,\n  blocks: [\n    {\n      type: 'header',\n      text: { type: 'plain_text', text: `⚠️ ${$json.alert_type} — Score ${$json.threat_score}/10` }\n    },\n    {\n      type: 'section',\n      fields: [\n        { type: 'mrkdwn', text: `*Source IP:*\\n\\`${$json.source_ip}\\`` },\n        { type: 'mrkdwn', text: `*Target:*\\n${$json.target_host}` },\n        { type: 'mrkdwn', text: `*MITRE:*\\n${($json.mitre || []).join(', ') || '—'}` },\n        { type: 'mrkdwn', text: `*Thread:*\\n${$json.thread_id}` }\n      ]\n    },\n    {\n      type: 'actions',\n      elements: [\n        {\n          type: 'button',\n          text: { type: 'plain_text', text: '✅ APPROVE — Block IP' },\n          style: 'primary',\n          url: `${$env.SOAR_API_URL}/api/v1/approve/${$json.thread_id}`\n        },\n        {\n          type: 'button',\n          text: { type: 'plain_text', text: '❌ DENY — False Positive' },\n          style: 'danger',\n          url: `${$env.SOAR_API_URL}/api/v1/deny/${$json.thread_id}`\n        },\n        {\n          type: 'button',\n          text: { type: 'plain_text', text: '🖥️ Dashboard' },\n          url: $env.DASHBOARD_URL || 'http://localhost:3000'\n        }\n      ]\n    }\n  ]\n}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "log-low",
+      "name": "Low Score — Log Only",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1300, 460],
+      "parameters": {}
+    },
+    {
+      "id": "no-pending-exit",
+      "name": "No Pending — Skip",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [860, 480],
+      "parameters": {}
+    }
+  ],
+  "connections": {
+    "Poll SOAR Metrics (every 30s)": {
+      "main": [[{ "node": "Parse Pending Approvals", "type": "main", "index": 0 }]]
+    },
+    "Parse Pending Approvals": {
+      "main": [[{ "node": "Any Pending Approvals?", "type": "main", "index": 0 }]]
+    },
+    "Any Pending Approvals?": {
+      "main": [
+        [{ "node": "Route by Threat Score", "type": "main", "index": 0 }],
+        [{ "node": "No Pending — Skip",     "type": "main", "index": 0 }]
+      ]
+    },
+    "Route by Threat Score": {
+      "main": [
+        [{ "node": "PagerDuty P1 (Score >= 9.0)",   "type": "main", "index": 0 }],
+        [{ "node": "Slack Alert (Score 7.5-9.0)",    "type": "main", "index": 0 }],
+        [{ "node": "Low Score — Log Only",            "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all"
+  },
+  "id": "soar-hitl-escalation-v1"
+}

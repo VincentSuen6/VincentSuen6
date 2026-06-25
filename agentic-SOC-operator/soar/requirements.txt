@@ -38,5 +38,8 @@ opentelemetry-instrumentation-fastapi>=0.45b0
 # Anthropic SDK — Sigma rule auto-generation in feedback.py
 anthropic>=0.30.0
 
+# MCP server — exposes SOAR tools to Claude agents
+mcp>=1.0.0
+
 # Testing
 pytest>=8.0.0

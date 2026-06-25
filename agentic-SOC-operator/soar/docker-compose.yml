@@ -137,6 +137,36 @@ services:
       - THEHIVE_ORG=${THEHIVE_ORG:-SOC}
 
   # ---------------------------------------------------------------------------
+  # MCP Server — exposes SOAR tools to Claude (Desktop, Code, agents)
+  # Runs as an SSE MCP server on port 8001 so remote Claude agents can connect.
+  # For Claude Desktop (local), run: python soar/mcp_server.py directly.
+  # ---------------------------------------------------------------------------
+  mcp-server:
+    build: .
+    command: python mcp_server.py
+    ports:
+      - "8001:8001"
+    restart: always
+    depends_on:
+      - cache
+      - postgres
+      - api-server
+    environment:
+      - REDIS_HOST=cache
+      - REDIS_PORT=6379
+      - POSTGRES_CONN=postgresql://soar:soar@postgres:5432/soar
+      - SOAR_API_URL=http://api-server:8000
+      - SOAR_API_KEY=${SOAR_API_KEYS:-}
+      - CELERY_BROKER_URL=amqp://broker:5672//
+      - REDIS_URL=redis://cache:6379/0
+      - VT_API_KEY=${VT_API_KEY:-}
+      - ABUSEIPDB_KEY=${ABUSEIPDB_KEY:-}
+      - OTX_API_KEY=${OTX_API_KEY:-}
+      - SHODAN_API_KEY=${SHODAN_API_KEY:-}
+      - MISP_URL=${MISP_URL:-}
+      - MISP_KEY=${MISP_KEY:-}
+
+  # ---------------------------------------------------------------------------
   # Next.js HITL Dashboard
   # ---------------------------------------------------------------------------
   dashboard:
