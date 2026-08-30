@@ -6,10 +6,10 @@ I am a third-year Computing Science student at Simon Fraser University and the E
 
 ## ⚡ Quick Overview
 
-- 🔬 **Research:** Developing autonomous AI agents for threat intelligence using LangGraph and the Anthropic API.
-- 🏆 **Competitive Excellence:** Placed Top 5 in the BC Region at CyberSci Canada Regionals (2025).
-- 🛡️ **Leadership:** Orchestrating industry partnerships, technical workshops, and sponsorships as External Director of the SFU Cybersecurity Club.
-- 📚 **Certifications:** ISC2 Certified in Cybersecurity (CC). (CompTIA Security+ and CCNA in progress)
+-  **Research:** Developing autonomous AI agents for threat intelligence using LangGraph and the Anthropic API.
+-  **Competitive Excellence:** Placed Top 5 in the BC Region at CyberSci Canada Regionals (2025).
+-  **Leadership:** Orchestrating industry partnerships, technical workshops, and sponsorships as External Director of the SFU Cybersecurity Club.
+- 📚**Certifications:** ISC2 Certified in Cybersecurity (CC). (CompTIA Security+ and CCNA in progress)
 
 ## 🛠️ Technical Arsenal
 
