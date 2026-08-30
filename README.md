@@ -1,15 +1,15 @@
-# Hi, I'm Vincent 🛡️
+# Hi, I'm Vincent 
 
-## Cybersecurity Researcher | CS @ SFU | SOC Specialist | ISC2 CC
+## AI Pentester | Security Engineer | Cybersecurity Researcher | CS @ SFU | 
 
 I am a third-year Computing Science student at Simon Fraser University and the External Director of the SFU Cybersecurity Club. My work focuses on the intersection of *Autonomous AI* and *Threat Intelligence*, specifically developing agents that automate vulnerability analysis and incident response.
 
-## ⚡ Quick Overview
+##  Quick Overview
 
 -  **Research:** Developing autonomous AI agents for threat intelligence using LangGraph and the Anthropic API.
 -  **Competitive Excellence:** Placed Top 5 in the BC Region at CyberSci Canada Regionals (2025).
 -  **Leadership:** Orchestrating industry partnerships, technical workshops, and sponsorships as External Director of the SFU Cybersecurity Club.
-- 📚**Certifications:** ISC2 Certified in Cybersecurity (CC). (CompTIA Security+ and CCNA in progress)
+- **Certifications:** ISC2 Certified in Cybersecurity (CC). (CompTIA Security+ and CCNA in progress)
 
 ## 🛠️ Technical Arsenal
 
@@ -22,7 +22,7 @@ I am a third-year Computing Science student at Simon Fraser University and the E
 | **Cloud & DevOps** | Docker, Docker Compose, Linux/Unix SysAdmin, Azure, OpenTelemetry, Jaeger, Prometheus |
 | **Red & Purple Team** | OWASP Top 10 Exploitation, WAF Bypass Testing, MITRE ATT&CK Emulation, C2 Frameworks, Frida |
 
-## 🧪 Specialized Training & Labs
+##  Specialized Training & Labs
 
 ### Antisyphon Training & Research Labs
 - 🔹 **Active Defense:** Implementing tactical deception and monitoring via home-lab environments.
@@ -32,7 +32,7 @@ I am a third-year Computing Science student at Simon Fraser University and the E
 
 ---
 
-## 📂 Featured Projects
+##  Featured Projects
 
 ---
 
@@ -189,7 +189,7 @@ A GitHub Actions workflow runs weekly (Mondays 03:00 UTC) and on manual trigger 
 
 ### [C2 Framework — Red Team Command and Control](https://github.com/VincentSuen6/VincentSuen6/tree/main/red-teaming/C2)
 
-> ⚠️ **Authorized use only.** Built for controlled lab environments, authorized penetration testing engagements, and red team research. Never deploy against systems without explicit written permission.
+>  **Authorized use only.** Built for controlled lab environments, authorized penetration testing engagements, and red team research. Never deploy against systems without explicit written permission.
 
 A modular Command and Control (C2) framework for authorized red team operations, built to emulate the operational patterns of commodity post-exploitation frameworks at the component level. The goal is to understand how real adversaries establish persistence and execute TTPs — knowledge that directly informs the detection engineering work in the SOAR platform.
 
@@ -219,13 +219,13 @@ Each component is deliberately minimal — the server is a few hundred lines of 
 
 ---
 
-## 🎓 Education & Institutional Leadership
+##  Education & Institutional Leadership
 
-- 🎓 **B.A.Sc. in Computer Science** | Simon Fraser University
-- 🛡️ **External Director** | Simon Fraser University Cybersecurity Club
-- 🔬 **Research Assistant** | SFU Department of Cybersecurity and AI
+-  **B.A.Sc. in Computer Science** | Simon Fraser University
+-  **External Director** | Simon Fraser University Cybersecurity Club
+-  **Research Assistant** | SFU Department of Cybersecurity and AI
 
-## 📬 Connect with Me
+##  Connect with Me
 
 - 💼 **LinkedIn:** [linkedin.com/in/vsuen6](https://linkedin.com/in/vsuen6)
 - 🐙 **GitHub:** [github.com/VincentSuen6](https://github.com/VincentSuen6)
